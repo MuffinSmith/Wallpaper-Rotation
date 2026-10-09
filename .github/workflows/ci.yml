@@ -1,0 +1,30 @@
+name: Native macOS checks
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: native-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-and-test:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Compiler and operating system
+        run: |
+          swift --version
+          sw_vers
+      - name: Fixture tests (no native wallpaper changes)
+        run: bash scripts/test.sh
+      - name: Build and verify ad-hoc signed app
+        run: bash scripts/build-app.sh
+      - name: Archive app preserving executable permissions and signatures
+        run: ditto -c -k --sequesterRsrc --keepParent "build/Wallpaper Rotation.app" build/Wallpaper-Rotation-macOS.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wallpaper-Rotation-macOS
+          path: build/Wallpaper-Rotation-macOS.zip
