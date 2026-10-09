@@ -23,7 +23,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var watchFD: Int32 = -1
     private var changeDebounce: Timer?
     private var lastAutomaticLocationRequest = Date.distantPast
-    private let adapter = NativeWallpaperAdapter()
+    private let adapter: NativeWallpaperAdapter
     private let solar = SolarSchedule()
     private lazy var location: LocationService = {
         let service = LocationService()
@@ -64,11 +64,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.init(configuration: AppConfiguration(), sets: [], enableEnvironment: nil, nativeWorker: NativeApplyWorker())
     }
     init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?,
-         nativeWorker: NativeApplyWorker = NativeApplyWorker()) {
+         nativeWorker: NativeApplyWorker = NativeApplyWorker(),
+         nativeAdapter: NativeWallpaperAdapter = NativeWallpaperAdapter()) {
         self.configuration = configuration
         self.sets = sets
         self.enableEnvironment = enableEnvironment
         self.nativeWorker = nativeWorker
+        self.adapter = nativeAdapter
         super.init()
     }
     var downloadRunning: Bool { downloadTask != nil }
@@ -160,7 +162,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshCatalog()
         if !readOnly {
             recoverPendingApply()
-            beginWatching()
+            startNativeObservation()
             let catalog = AppleSetCatalog()
             availabilityObserver = AssetAvailabilityObserver(
                 directories: [catalog.videosDirectory, catalog.manifestURL.deletingLastPathComponent()]) { [weak self] in
@@ -218,7 +220,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     @objc private func closeReadOnlySettings() { guard readOnly else { return }; settings?.close() }
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate(); changeDebounce?.invalidate(); watch?.cancel()
+        timer?.invalidate(); stopNativeObservation()
         availabilityObserver?.stop()
         downloadTask?.cancel(); downloader?.cancel()
     }
@@ -541,7 +543,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else { recalculate(apply: false) }
         requestAutomaticLocationIfNeeded(force: true)
     }
-    private func beginWatching() {
+    /// Observe the adapter's real store directory; fixtures use this same event/debounce path.
+    func startNativeObservation() {
+        guard !readOnly, watch == nil else { return }
         watchFD = open(adapter.storeURL.deletingLastPathComponent().path, O_EVTONLY)
         guard watchFD >= 0 else { message = "Wallpaper change monitoring unavailable; rotation cannot safely run."; return }
         let descriptor = watchFD
@@ -553,6 +557,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         source.setCancelHandler { close(descriptor) }; watch = source; source.resume()
+    }
+    func stopNativeObservation() {
+        changeDebounce?.invalidate(); changeDebounce = nil
+        watch?.cancel(); watch = nil; watchFD = -1
     }
     private func scheduleNativeCheck() {
         changeDebounce?.invalidate()

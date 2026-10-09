@@ -43,6 +43,16 @@ Responsiveness fixtures must use the production adapter with a delayed reload an
 dispatch native control actions while a main run-loop timer continues to fire.
 An instantaneous fake apply cannot establish this property.
 
+macOS may rewrite a shared Linked selection as matching Desktop and Idle
+selections after reloading. Ownership must compare the complete configuration
+and content context for both branches before accepting that equivalent layout.
+Exclude only the synthetic node-type marker; asset, provider, files, options and
+unknown values remain significant. Apply and conditional restore must use the
+same projection so original values follow equivalent branches without rewriting
+Apple's current node type. Ambiguous merged originals must never be guessed.
+Exercise delayed rewrites through the actual directory watcher and debounce;
+an immediate readback or a coordinator without observation can miss this case.
+
 ## Pull requests
 
 Keep main buildable. Include the concrete behavior change and relevant test

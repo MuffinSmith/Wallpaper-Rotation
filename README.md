@@ -62,6 +62,9 @@ During an update, Settings remains usable and shows its progress. Further set or
 scene changes replace the queued choice; Pause stops future updates immediately.
 Quit finishes the in-progress transaction before exiting and preserves your
 rotation preference for the next launch.
+Rapid consecutive set changes can still trigger a protective pause while macOS
+finishes reloading; this separate native-writer race is tracked in
+[issue #8](https://github.com/MuffinSmith/Wallpaper-Rotation/issues/8).
 
 ## Updates and recovery
 
