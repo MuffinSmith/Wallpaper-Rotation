@@ -38,7 +38,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var draftSetID: String?
     private var draftMapping: [WallpaperPhase: String] = [:]
     private var renderedSet: WallpaperSet?
-    private var previewIDs: [WallpaperPhase: String] = [:]
+    private let thumbnails = SceneThumbnailCache()
     private var customizationExpanded = false
     private var hasDraftEdits = false
     private var documentView: NSView?
@@ -137,6 +137,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         setPicker.target = self; setPicker.action = #selector(setChanged)
         setPicker.widthAnchor.constraint(equalToConstant: 330).isActive = true
         setPicker.setAccessibilityLabel("Wallpaper set")
+        setPicker.imagePosition = .noImage
+        setPicker.lineBreakMode = .byTruncatingTail
         let selection = row([label("Wallpaper Set"), spacer(), setPicker])
         let gallery = row([], spacing: 12)
         gallery.distribution = .fillEqually; gallery.alignment = .top
@@ -181,6 +183,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             picker.target = self; picker.action = #selector(roleChanged(_:))
             picker.identifier = NSUserInterfaceItemIdentifier(phase.rawValue)
             picker.setAccessibilityLabel("Scene for \(phase.title)")
+            picker.imagePosition = .noImage
+            picker.lineBreakMode = .byTruncatingTail
             picker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             let caption = label(phase.title)
             caption.widthAnchor.constraint(equalToConstant: 120).isActive = true
@@ -245,11 +249,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let id = draftSetID ?? coordinator.browsedSet?.id ?? coordinator.selectedSet?.id
         let set = coordinator.sets.first { $0.id == id }
-        setPicker.removeAllItems()
-        for item in coordinator.sets {
-            setPicker.addItem(withTitle: item.name); setPicker.lastItem?.representedObject = item.id
+        let existingSets = setPicker.itemArray.compactMap { $0.representedObject as? String }
+        if existingSets != coordinator.sets.map(\.id) {
+            setPicker.removeAllItems()
+            for item in coordinator.sets {
+                setPicker.addItem(withTitle: item.name); setPicker.lastItem?.representedObject = item.id
+            }
         }
-        if let id, let index = coordinator.sets.firstIndex(where: { $0.id == id }) { setPicker.selectItem(at: index) }
+        for (index, item) in coordinator.sets.enumerated() {
+            let menuItem = setPicker.item(at: index)
+            menuItem?.title = item.name
+            // This only illustrates the collection; it does not assign a phase.
+            let representative = item.asset(for: .day, mapping: coordinator.mapping(for: item)) ?? item.assets.first
+            menuItem?.image = thumbnails.image(at: representative?.previewURL, size: .menu)
+        }
+        if let id, let index = coordinator.sets.firstIndex(where: { $0.id == id }), setPicker.indexOfSelectedItem != index {
+            setPicker.selectItem(at: index)
+        }
+        updateSelectedTitle(of: setPicker)
         setPicker.isEnabled = !coordinator.readOnly
         // Movie availability is a live filesystem property, so equality of
         // catalog models cannot tell us whether picker labels need refreshing.
@@ -271,10 +288,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             // Update status in place; rebuilding a tracked popup during byte
             // progress can move the item underneath the user's pointer.
             for (index, asset) in assets.enumerated() {
-                picker.item(at: index + 1)?.title = asset.name + (asset.isDownloaded ? "" : " — Download required")
+                let menuItem = picker.item(at: index + 1)
+                menuItem?.title = asset.name + (asset.isDownloaded ? "" : " — Download required")
+                menuItem?.image = thumbnails.image(at: asset.previewURL, size: .menu)
             }
             let selected = draftMapping[phase].flatMap { id in assets.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0
             if picker.indexOfSelectedItem != selected { picker.selectItem(at: selected) }
+            updateSelectedTitle(of: picker)
             picker.isEnabled = !coordinator.readOnly
         }
         let needsReview = set.map { $0.requiresReview && coordinator.configuration.mappings[$0.id] == nil } ?? false
@@ -393,28 +413,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let source = fix.source == "Manual coordinates" ? "Saved coordinates" : "Saved Mac location"
         locationDetail.stringValue = "\(source) · Updated \(date.string(from: fix.capturedAt))"
     }
+    private func updateSelectedTitle(of picker: NSPopUpButton) {
+        guard let cell = picker.cell as? NSPopUpButtonCell else { return }
+        let title = picker.selectedItem?.title ?? ""
+        // A separate text-only display item keeps 30-point menu previews out
+        // of the compact button, without changing the actual menu selection.
+        if cell.usesItemFromMenu {
+            cell.usesItemFromMenu = false
+            cell.menuItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        } else {
+            cell.menuItem?.title = title
+        }
+    }
     private func loadPreviews() {
         let actual = Set(coordinator.inspection?.selections.values.map { $0 } ?? [])
         for phase in WallpaperPhase.allCases {
             let asset = renderedSet?.asset(for: phase, mapping: draftMapping)
             previews[phase]?.isCurrent = asset.map { actual.count == 1 && actual.contains($0.id) } ?? false
-            if previewIDs[phase] == asset?.id { continue }
-            previews[phase]?.image = nil; previewIDs[phase] = asset?.id
-            guard let url = asset?.previewURL, url.isFileURL,
-                  let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 420,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceShouldCacheImmediately: true
-                  ] as CFDictionary) else { continue }
-            previews[phase]?.image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+            previews[phase]?.placeholder = asset == nil && renderedSet?.assets.isEmpty == false
+                ? "Choose a scene" : "Preview unavailable"
+            // The URL can change after a catalog refresh without the asset ID changing.
+            // Failed decodes retry later, so a previously missing preview can recover.
+            let image = thumbnails.image(at: asset?.previewURL, size: .gallery)
+            if previews[phase]?.image !== image { previews[phase]?.image = image }
         }
     }
     func windowWillClose(_ notification: Notification) {
         downloadIndicator.stopAnimation(nil)
         for preview in previews.values { preview.image = nil }
-        previews.removeAll(); previewIDs.removeAll(); rolePickers.removeAll()
+        setPicker.removeAllItems()
+        for picker in rolePickers.values { picker.removeAllItems() }
+        thumbnails.removeAll()
+        previews.removeAll(); rolePickers.removeAll()
         scrollView?.documentView = nil; documentView = nil; scrollView = nil
         coordinator.settingsClosed()
     }
@@ -503,6 +533,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func refresh() { coordinator.refreshCatalog() }
     @objc private func restore() { coordinator.restorePreviousSetup() }
     @objc private func rotationChanged() { coordinator.toggleRotation() }
+    // Read-only visual QA uses the same native menu as the interactive picker.
+    func showPreviewMenuForQA(showSets: Bool) {
+        guard coordinator.readOnly else { return }
+        if !showSets && customization.isHidden {
+            customizationExpanded = true
+            render()
+            window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        guard let picker = showSets ? setPicker : rolePickers[.day],
+              let menu = picker.menu else { return }
+        picker.scrollToVisible(picker.bounds)
+        menu.popUp(positioning: picker.selectedItem, at: NSPoint(x: 0, y: picker.bounds.maxY), in: picker)
+    }
     func saveSnapshot(to url: URL) {
         guard coordinator.readOnly, let view = documentView,
               let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
@@ -527,6 +570,7 @@ private final class SettingsGroupView: NSView {
 private final class ScenePreviewView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var isCurrent = false { didSet { if oldValue != isCurrent { needsDisplay = true } } }
+    var placeholder = "Preview unavailable" { didSet { if oldValue != placeholder { needsDisplay = true } } }
     override func draw(_ dirtyRect: NSRect) {
         let frame = bounds.insetBy(dx: 1, dy: 1)
         let shape = NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8)
@@ -540,7 +584,7 @@ private final class ScenePreviewView: NSView {
             image.draw(in: frame, from: source, operation: .sourceOver, fraction: 1, respectFlipped: true,
                        hints: [.interpolation: NSImageInterpolation.high.rawValue])
         } else {
-            let text = "Preview unavailable" as NSString
+            let text = placeholder as NSString
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
             let size = text.size(withAttributes: attributes)
             text.draw(at: NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2), withAttributes: attributes)
@@ -563,5 +607,60 @@ private final class PhaseDotView: NSView {
         case .night: color = .secondaryLabelColor
         }
         color.setFill(); NSBezierPath(ovalIn: bounds).fill()
+    }
+}
+
+/// Local still-image decoding only; owned and emptied by the Settings window.
+@MainActor
+final class SceneThumbnailCache {
+    enum Size { case menu, gallery }
+    private let images = NSCache<NSString, NSImage>()
+    private var failures: [String: Date] = [:]
+
+    init() {
+        images.countLimit = 128
+        images.totalCostLimit = 12 * 1_024 * 1_024
+    }
+
+    func image(at url: URL?, size: Size, now: Date = Date()) -> NSImage? {
+        guard let url, url.isFileURL else { return nil }
+        let pixelLimit = size == .menu ? 96 : 420
+        let key = "\(pixelLimit):\(url.absoluteString)"
+        if let cached = images.object(forKey: key as NSString) { return cached }
+        if let failed = failures[key], now.timeIntervalSince(failed) < 5 { return nil }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: pixelLimit,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else {
+            failures[key] = now
+            return nil
+        }
+        let image: NSImage
+        if size == .menu {
+            // A fixed 16:10 canvas gives native menus a consistent image column.
+            guard let context = CGContext(data: nil, width: 96, height: 60, bitsPerComponent: 8,
+                                          bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            let scale = max(96 / CGFloat(thumbnail.width), 60 / CGFloat(thumbnail.height))
+            let width = CGFloat(thumbnail.width) * scale, height = CGFloat(thumbnail.height) * scale
+            context.interpolationQuality = .high
+            context.draw(thumbnail, in: CGRect(x: (96 - width) / 2, y: (60 - height) / 2, width: width, height: height))
+            guard let cropped = context.makeImage() else { return nil }
+            image = NSImage(cgImage: cropped, size: NSSize(width: 48, height: 30))
+        } else {
+            image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+        }
+        failures[key] = nil
+        let cost = size == .menu ? 96 * 60 * 4 : thumbnail.bytesPerRow * thumbnail.height
+        images.setObject(image, forKey: key as NSString, cost: cost)
+        return image
+    }
+
+    func removeAll() {
+        images.removeAllObjects()
+        failures.removeAll()
     }
 }

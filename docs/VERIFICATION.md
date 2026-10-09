@@ -102,7 +102,7 @@ retain process allocations. Higher open-Settings memory is permitted by the user
 
 ## Scene-set downloads 0.3
 
-78 integrated fixtures passed: 14 persistence/event-observer, 22 core/policy,
+80 integrated fixtures passed: 16 persistence/event/thumbnail, 22 core/policy,
 42 catalog/adapter/movie/download. The 19 dedicated movie/catalog/downloader
 fixtures use an injected transport and disposable generated raw video; they make
 no network requests. They cover missing-only transfers, failures, cancellation,
@@ -133,3 +133,16 @@ A real URLSession HEAD request to Tahoe Day’s native catalog URL returned HTTP
 200, Content-Length 467,039,502 and zero body bytes from sylvan.apple.com. This
 confirms endpoint/TLS reachability without downloading another movie; it does
 not establish successful complete production transfer or installation.
+
+### Bundled still previews
+
+Fresh read-only inspection of this Mac found local 214 × 130 PNG previews for
+all 97 assets in the 19 supported sets, independent of the 16 complete movies.
+All five Sonoma previews exist even though all five movies are absent. The
+Settings collection and scene menus use these local stills; no preview network
+request or movie download is required. Unknown phase assignments remain empty.
+The window owns a bounded thumbnail cache and releases its references on close.
+Two generated-PNG fixtures verify local-only bounded decoding, missing-preview
+retry and cache release. Actual native menu captures show all five undownloaded
+Sonoma scene stills and a representative still for each collection. Screenshots
+remain outside the repository.

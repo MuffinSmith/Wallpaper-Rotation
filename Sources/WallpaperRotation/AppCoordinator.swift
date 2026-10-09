@@ -150,6 +150,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         if !CommandLine.arguments.contains("--hide-settings") && (readOnly || configuration.receipt == nil || visualAssetID != nil || pendingApply != nil) { showSettings() }
+        if readOnly && (CommandLine.arguments.contains("--show-set-choices") || CommandLine.arguments.contains("--show-scene-choices")) {
+            let showSets = CommandLine.arguments.contains("--show-set-choices")
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.settings?.showPreviewMenuForQA(showSets: showSets) }
+            }
+        }
         if readOnly && CommandLine.arguments.contains("--close-settings-after-preview") {
             Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(closeReadOnlySettings), userInfo: nil, repeats: false)
         }

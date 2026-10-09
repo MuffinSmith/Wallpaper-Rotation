@@ -40,6 +40,8 @@ building. It does not create certificates, alter Keychain, or notarize a release
    in Settings, or **Download [set]…** in the menu, for missing scenes. Downloads
    come from Apple’s catalog and save to the native movie cache. Completed Apple
    downloads are recognized automatically; partial movies stay unavailable.
+   Set and scene menus show Apple’s small bundled previews even before the full
+   videos are downloaded. Unassigned phases remain yours to choose.
    Review proposed role mappings for unfamiliar sets. Download completion leaves
    your current wallpaper and rotation selection intact until you confirm the set.
 3. Use **Change…** in Location to choose this Mac’s location or provide coordinates. A saved location supports
