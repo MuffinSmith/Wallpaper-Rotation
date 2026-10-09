@@ -259,14 +259,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         renderedSet = set
         for phase in WallpaperPhase.allCases {
             guard let picker = rolePickers[phase] else { continue }
-            picker.removeAllItems(); picker.addItem(withTitle: "Choose an Apple scene…")
-            if let set {
-                for asset in set.assets {
-                    picker.addItem(withTitle: asset.name + (asset.isDownloaded ? "" : " — Download required"))
+            let assets = set?.assets ?? []
+            let existing = picker.itemArray.dropFirst().compactMap { $0.representedObject as? String }
+            if picker.numberOfItems == 0 || existing != assets.map(\.id) {
+                picker.removeAllItems(); picker.addItem(withTitle: "Choose an Apple scene…")
+                for asset in assets {
+                    picker.addItem(withTitle: asset.name)
                     picker.lastItem?.representedObject = asset.id
                 }
-                if let assetID = draftMapping[phase], let index = set.assets.firstIndex(where: { $0.id == assetID }) { picker.selectItem(at: index + 1) }
             }
+            // Update status in place; rebuilding a tracked popup during byte
+            // progress can move the item underneath the user's pointer.
+            for (index, asset) in assets.enumerated() {
+                picker.item(at: index + 1)?.title = asset.name + (asset.isDownloaded ? "" : " — Download required")
+            }
+            let selected = draftMapping[phase].flatMap { id in assets.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0
+            if picker.indexOfSelectedItem != selected { picker.selectItem(at: selected) }
             picker.isEnabled = !coordinator.readOnly
         }
         let needsReview = set.map { $0.requiresReview && coordinator.configuration.mappings[$0.id] == nil } ?? false
