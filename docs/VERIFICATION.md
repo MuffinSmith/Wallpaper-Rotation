@@ -146,3 +146,41 @@ Two generated-PNG fixtures verify local-only bounded decoding, missing-preview
 retry and cache release. Actual native menu captures show all five undownloaded
 Sonoma scene stills and a representative still for each collection. Screenshots
 remain outside the repository.
+
+## Enable the visible set 0.3.1
+
+The reported failure was reproduced in the activation flow: Settings could show
+unreviewed Tahoe while Enable still checked and applied the committed Golden Gate
+selection. Enable now validates and saves the exact visible set and four scene
+choices before compatibility checks or native application. Incomplete choices,
+missing downloads and failed saves cannot fall back to another set. Runtime
+readiness still follows the committed selection, so browsing a missing set does
+not pause active rotation. Existing ready-set changes during active rotation
+remain explicit live changes. Compatibility completion retains the accepted
+selection rather than rereading a subsequently browsed set.
+
+87 combined fixtures passed: 23 app/persistence/event/thumbnail/selection,
+22 core/policy, 42 catalog/adapter/movie/download. Seven new selection tests
+include reviewed/unreviewed Tahoe, real AppKit popup and switch action dispatch
+through Settings and the coordinator, repeated renders and availability-label
+changes, customized scene choices, missing downloads, both save-failure stages,
+async compatibility completion and preservation of active rotation. Persistence,
+compatibility service and final native apply are injected in those fixtures.
+They do not claim external mouse automation; accessibility access was unavailable.
+The release build, plist lint and strict ad-hoc signatures passed.
+
+The installed app was gracefully replaced with 0.3.1 build 6. A private backup
+preceded correction of the user's intended Tahoe selection and complete mapping
+while the app was stopped; enabled state, location and receipt were preserved.
+Normal startup then applied Tahoe Night through the existing native gateway.
+Readback found all 30 managed Desktop/Idle/Linked selectors set to Tahoe Night;
+the native Apple aerial process held that movie. The updated ownership receipt
+matched Tahoe Night, its original restore baseline was unchanged, and no pending
+operations remained. The ordinary rendered Settings showed Tahoe Night, rotation
+enabled, its next transition and Start at Login enabled. This is live selector
+and movie-activation evidence, not a new inspection of every Space or screen saver.
+
+Snark's first weighted bug-fix review scored 8.3/10 with no blocking findings
+(correctness 2.2, safety 2.2, maintainability 1.2, evidence 1.1, UI 0.8, updates 0.8).
+Private screenshots, configuration backups and local coordinates remain outside
+the repository. No new OS restart or morning transition was observed.
