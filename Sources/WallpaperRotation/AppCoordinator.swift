@@ -43,6 +43,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var downloadingSetID: String?
     private(set) var downloadProgress: WallpaperDownloadProgress?
     private var browsedSetID: String?
+    struct EnableEnvironment {
+        let isReady: () -> Bool
+        let saveConfiguration: (AppConfiguration) throws -> Void
+        let applyAsset: (String) -> Void
+        let checkCompatibility: (@escaping () -> Void) -> Void
+        let showSettings: () -> Void
+    }
+    private let enableEnvironment: EnableEnvironment?
+
+    override convenience init() {
+        self.init(configuration: AppConfiguration(), sets: [], enableEnvironment: nil)
+    }
+    init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?) {
+        self.configuration = configuration
+        self.sets = sets
+        self.enableEnvironment = enableEnvironment
+        super.init()
+    }
     var downloadRunning: Bool { downloadTask != nil }
     var browsedSet: WallpaperSet? { sets.first { $0.id == browsedSetID } ?? selectedSet }
     var verificationRunning: Bool { verificationProcess != nil || visualAssetID != nil }
@@ -53,9 +71,23 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ?? sets.first { $0.name == "Golden Gate" }
             ?? sets.first { ready($0) }
     }
-    var nativeReady: Bool { inspection.map { AppStorage.smokePassed(for: $0) } ?? false }
-    var canEnable: Bool {
-        !readOnly && !terminationPending && configurationLoadError == nil && pendingApply == nil && watchFD >= 0 && !verificationRunning && inspection != nil && configuration.lastFix != nil && ready(selectedSet)
+    var nativeReady: Bool { enableEnvironment?.isReady() ?? (inspection.map { AppStorage.smokePassed(for: $0) } ?? false) }
+    private var canPrepareRotation: Bool {
+        !readOnly && !terminationPending && configurationLoadError == nil && pendingApply == nil && (enableEnvironment != nil || watchFD >= 0) && !verificationRunning && (enableEnvironment != nil || inspection != nil) && configuration.lastFix != nil
+    }
+    // Runtime application is governed by the committed selection, even while another set is browsed.
+    var canEnable: Bool { canPrepareRotation && ready(selectedSet) }
+    private var requestedRotationSelection: RotationSelection? {
+        if let settings { return settings.rotationSelection }
+        let id = browsedSetID ?? selectedSet?.id
+        guard let set = sets.first(where: { $0.id == id }) else { return nil }
+        return RotationSelection(setID: set.id, mapping: mapping(for: set))
+    }
+    var canEnableRequestedRotation: Bool {
+        canEnableRotation(using: requestedRotationSelection)
+    }
+    func canEnableRotation(using selection: RotationSelection?) -> Bool {
+        canPrepareRotation && selection.map { $0.problem(in: sets) == nil } == true
     }
     var readiness: String {
         if readOnly { return "Read-only preview: no settings or wallpaper changes." }
@@ -65,9 +97,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let error = configurationLoadError { return error }
         if inspection == nil { return "Native wallpaper storage is unavailable. \(message)" }
         if watchFD < 0 { return "Wallpaper change monitoring is unavailable; rotation is paused." }
-        if !nativeReady { return "Compatibility will be checked when you enable rotation." }
         if configuration.lastFix == nil { return "Choose a location to calculate today’s transitions." }
-        if !ready(selectedSet) { return "Review all four scenes and download their Apple assets before enabling." }
+        if !configuration.rotationEnabled {
+            if let selection = requestedRotationSelection, let problem = selection.problem(in: sets) { return problem }
+            if requestedRotationSelection == nil { return "Choose a wallpaper set before enabling rotation." }
+        } else if !ready(selectedSet) { return "Review all four scenes and download their Apple assets before enabling." }
+        if !nativeReady { return "Compatibility will be checked when you enable rotation." }
         return configuration.rotationEnabled ? "Rotation enabled" : "Paused: \(configuration.pauseReason ?? "By you")"
     }
     var currentTitle: String {
@@ -269,12 +304,20 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         message = "Cancelling download…"; render()
     }
     func confirmMapping(setID: String, value: [WallpaperPhase: String]) {
-        guard !readOnly, let set = sets.first(where: { $0.id == setID }),
-              WallpaperPhase.allCases.allSatisfy({ set.asset(for: $0, mapping: value)?.isDownloaded == true }) else {
-            message = "Download each selected scene in Apple Wallpaper Settings first."; render(); return
+        guard commitRotationSelection(RotationSelection(setID: setID, mapping: value)) else { return }
+        browsedSetID = setID
+        recalculate(apply: configuration.rotationEnabled)
+    }
+    private func commitRotationSelection(_ selection: RotationSelection) -> Bool {
+        guard !readOnly, configurationLoadError == nil else { return false }
+        do {
+            configuration = try selection.commit(to: configuration, sets: sets, save: saveConfiguration)
+            return true
+        } catch {
+            message = error.localizedDescription
+            render()
+            return false
         }
-        configuration.mappings[setID] = value
-        if persist() { select(setID) }
     }
     func receive(_ fix: LocationFix) {
         guard !readOnly, fix.coordinate.isValid else { return }
@@ -296,10 +339,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastAutomaticLocationRequest = Date()
         location.requestLocation(userInitiated: false)
     }
-    @objc func toggleRotation() {
+    @objc func toggleRotation() { requestRotationToggle(using: requestedRotationSelection) }
+    func requestRotationToggle(using selection: RotationSelection?) {
         if configuration.rotationEnabled { pause("By you"); return }
-        guard canEnable else { showSettings(); return }
-        guard nativeReady else { checkCompatibilityAndEnable(); return }
+        guard let selection else {
+            message = "Choose a wallpaper set and all four scenes before enabling rotation."
+            showSettings(); return
+        }
+        enableRotation(using: selection)
+    }
+    private func enableRotation(using selection: RotationSelection) {
+        guard canPrepareRotation else { showSettings(); return }
+        if let problem = selection.problem(in: sets) {
+            message = problem; showSettings(); return
+        }
+        // Enable explicitly accepts the visible mapping, including a suggested Morning scene.
+        // Persist both the chosen set and mapping before compatibility can touch native wallpaper.
+        guard commitRotationSelection(selection) else { return }
+        guard nativeReady else { checkCompatibilityAndEnable(selection: selection); return }
         if let receipt = configuration.receipt {
             do {
                 if try adapter.hasExternalChange(since: receipt) {
@@ -339,6 +396,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let asset = set.asset(for: phase, mapping: mapping(for: set)), asset.isDownloaded else {
             if configuration.rotationEnabled { pause("Scene or compatibility check unavailable") }; return
         }
+        if let enableEnvironment { enableEnvironment.applyAsset(asset.id); return }
         // Every native write runs synchronously on the main actor through this gateway.
         let startedAt = Date()
         var producedReceipt: OwnershipReceipt?
@@ -467,9 +525,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard configuration.rotationEnabled else { inspection = try? adapter.inspect(); render(); return }
         _ = checkOwnership(); render()
     }
+    private func saveConfiguration(_ value: AppConfiguration) throws {
+        if let enableEnvironment { try enableEnvironment.saveConfiguration(value) }
+        else { try AppStorage.save(value) }
+    }
     @discardableResult private func persist() -> Bool {
         guard !readOnly, configurationLoadError == nil else { return false }
-        do { try AppStorage.save(configuration); return true }
+        do { try saveConfiguration(configuration); return true }
         catch { message = error.localizedDescription; configuration.rotationEnabled = false; configuration.pauseReason = "Configuration could not be saved"; render(); return false }
     }
     func loginStatus() -> SMAppService.Status { SMAppService.mainApp.status }
@@ -512,7 +574,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     /// Explicit Enable authorizes this one-time round trip. OS changes never
     /// start it in the background; startup pauses until the user enables again.
-    private func checkCompatibilityAndEnable() {
+    private func checkCompatibilityAndEnable(selection: RotationSelection) {
+        if let enableEnvironment {
+            enableEnvironment.checkCompatibility { [weak self] in self?.enableRotation(using: selection) }
+            return
+        }
         guard canEnable, let inspection, let set = selectedSet,
               let day = set.asset(for: .day, mapping: mapping(for: set)), day.isDownloaded,
               let night = set.asset(for: .night, mapping: mapping(for: set)), night.isDownloaded else { return }
@@ -529,7 +595,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.inspection = try? self.adapter.inspect()
                 if succeeded, AppStorage.smokePassed(for: inspection), self.nativeReady {
                     self.message = ""
-                    self.toggleRotation()
+                    // Resume the accepted action, not a different set browsed during the check.
+                    self.enableRotation(using: selection)
                 } else {
                     self.recoverPendingApply()
                     if self.pendingApply == nil && self.configurationLoadError == nil {
@@ -621,6 +688,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch { message = "Temporary scene restoration failed: \(error.localizedDescription). Recovery is retained; retry Restore & Cancel before quitting."; render(); return false }
     }
     @objc func showSettings() {
+        if let enableEnvironment { enableEnvironment.showSettings(); return }
         refreshAvailability()
         if settings == nil { settings = SettingsWindowController(coordinator: self) }
         settings?.showWindow(nil); NSApp.activate(); settings?.window?.makeKeyAndOrderFront(nil)
@@ -676,7 +744,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(download)
         }
         let rotation = NSMenuItem(title: "Rotation Enabled", action: #selector(toggleRotation), keyEquivalent: "")
-        rotation.target = self; rotation.state = configuration.rotationEnabled ? .on : .off; rotation.isEnabled = configuration.rotationEnabled || canEnable
+        rotation.target = self; rotation.state = configuration.rotationEnabled ? .on : .off; rotation.isEnabled = configuration.rotationEnabled || canEnableRequestedRotation
         menu.addItem(rotation)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","); settingsItem.target = self; menu.addItem(settingsItem)
         menu.addItem(.separator())

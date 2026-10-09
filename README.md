@@ -48,6 +48,8 @@ building. It does not create certificates, alter Keychain, or notarize a release
    temporary outages; location updates use occasional one-shot requests.
 4. Enable **Rotation**. If this OS build has not been checked, the app briefly
    tests Day and Night, restores your setup, then starts the current scene.
+   Enable saves the set and four scene choices currently shown in Settings.
+   Incomplete or undownloaded choices block activation and explain what is missing.
    First launch leaves wallpaper unchanged until you enable rotation.
 5. Optionally enable Start at Login. Its switch reflects macOS's actual
    registration status; an unsigned/ad-hoc build may require approval or fail.

@@ -43,6 +43,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var hasDraftEdits = false
     private var documentView: NSView?
     private var scrollView: NSScrollView?
+    var rotationSelection: RotationSelection? {
+        renderedSet.map { RotationSelection(setID: $0.id, mapping: draftMapping) }
+    }
 
     init(coordinator: AppCoordinator) {
         self.coordinator = coordinator
@@ -239,9 +242,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         currentLabel.stringValue = "Now: \(coordinator.currentTitle)"
         nextLabel.stringValue = coordinator.nextTitle
         rotationSwitch.state = coordinator.configuration.rotationEnabled ? .on : .off
-        rotationSwitch.isEnabled = !coordinator.readOnly && (coordinator.configuration.rotationEnabled || coordinator.canEnable)
-        stateLabel.stringValue = coordinator.readiness
-        stateLabel.isHidden = ["Rotation enabled", "Paused: By you", "Paused: Not enabled"].contains(coordinator.readiness)
         let routineMessages = ["Location saved.", "Apple sets refreshed.", "Start at Login updated.", "Following Mac location",
                                "Resuming uses your current wallpaper setup as the restore baseline."]
         messageLabel.stringValue = coordinator.message
@@ -274,6 +274,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             draftMapping = set.map(coordinator.mapping) ?? [:]; hasDraftEdits = false
         }
         renderedSet = set
+        rotationSwitch.isEnabled = !coordinator.readOnly && (coordinator.configuration.rotationEnabled || coordinator.canEnableRotation(using: rotationSelection))
         for phase in WallpaperPhase.allCases {
             guard let picker = rolePickers[phase] else { continue }
             let assets = set?.assets ?? []
@@ -297,6 +298,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             updateSelectedTitle(of: picker)
             picker.isEnabled = !coordinator.readOnly
         }
+        stateLabel.stringValue = coordinator.readiness
+        stateLabel.isHidden = ["Rotation enabled", "Paused: By you", "Paused: Not enabled"].contains(coordinator.readiness)
         let needsReview = set.map { $0.requiresReview && coordinator.configuration.mappings[$0.id] == nil } ?? false
         customization.isHidden = !customizationExpanded && !needsReview
         customizeButton.title = customization.isHidden ? "Customize Scenes…" : "Hide Scene Choices"
@@ -304,7 +307,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         mappingButton.isHidden = !needsReview && !hasDraftEdits && set?.id == coordinator.selectedSet?.id
         mappingButton.title = needsReview ? "Confirm Scenes" : (set?.id == coordinator.selectedSet?.id ? "Save Scenes" : "Use This Set")
         mappingButton.isEnabled = !coordinator.readOnly && selectedDownloaded
-        mappingHelp.stringValue = needsReview ? "Review the four scenes before using this set. Your current wallpaper will stay in place." : "Choose the Apple scene to use at each time of day."
+        mappingHelp.stringValue = needsReview ? "Review the four scenes below. Enable Rotate Automatically to use these choices, or confirm them now." : "Choose the Apple scene to use at each time of day."
         renderDownloads(set: set, needsReview: needsReview, selectedDownloaded: selectedDownloaded)
         loadPreviews()
         renderSchedule()
@@ -532,7 +535,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func openWallpaper() { coordinator.openWallpaperSettings() }
     @objc private func refresh() { coordinator.refreshCatalog() }
     @objc private func restore() { coordinator.restorePreviousSetup() }
-    @objc private func rotationChanged() { coordinator.toggleRotation() }
+    @objc private func rotationChanged() { coordinator.requestRotationToggle(using: rotationSelection) }
     // Read-only visual QA uses the same native menu as the interactive picker.
     func showPreviewMenuForQA(showSets: Bool) {
         guard coordinator.readOnly else { return }
