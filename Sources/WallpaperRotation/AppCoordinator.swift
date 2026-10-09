@@ -43,9 +43,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ?? sets.first { $0.name == "Golden Gate" }
             ?? sets.first { ready($0) }
     }
-    var nativeVerified: Bool { inspection.map(AppStorage.verified) ?? false }
+    var nativeReady: Bool { inspection.map { AppStorage.smokePassed(for: $0) } ?? false }
     var canEnable: Bool {
-        !readOnly && configurationLoadError == nil && pendingApply == nil && watchFD >= 0 && !verificationRunning && nativeVerified && configuration.lastFix != nil && ready(selectedSet)
+        !readOnly && configurationLoadError == nil && pendingApply == nil && watchFD >= 0 && !verificationRunning && inspection != nil && configuration.lastFix != nil && ready(selectedSet)
     }
     var readiness: String {
         if readOnly { return "Read-only preview: no settings or wallpaper changes." }
@@ -55,7 +55,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let error = configurationLoadError { return error }
         if inspection == nil { return "Native wallpaper storage is unavailable. \(message)" }
         if watchFD < 0 { return "Wallpaper change monitoring is unavailable; rotation is paused." }
-        if !nativeVerified { return "Verify wallpaper and screen saver on this Mac before enabling rotation." }
+        if !nativeReady { return "Compatibility will be checked when you enable rotation." }
         if configuration.lastFix == nil { return "Choose a location to calculate today’s transitions." }
         if !ready(selectedSet) { return "Review all four scenes and download their Apple assets before enabling." }
         return configuration.rotationEnabled ? "Rotation enabled" : "Paused: \(configuration.pauseReason ?? "By you")"
@@ -74,7 +74,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var nextTitle: String {
         guard configuration.rotationEnabled else { return "Rotation paused" }
         guard let next = schedule?.nextTransition else { return "No transition scheduled" }
-        return "Next: \(next.phase.title) · \(formatTime(next.date))"
+        let calendar = Calendar.autoupdatingCurrent
+        let when: String
+        if calendar.isDateInToday(next.date) { when = formatTime(next.date) }
+        else if calendar.isDateInTomorrow(next.date) { when = "Tomorrow, \(formatTime(next.date))" }
+        else {
+            let date = DateFormatter(); date.dateStyle = .medium; date.timeStyle = .short
+            when = date.string(from: next.date)
+        }
+        return "Next: \(next.phase.title) · \(when)"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -106,7 +114,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: .NSCalendarDayChanged, object: nil)
             NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: .NSSystemClockDidChange, object: nil)
             if configuration.rotationEnabled {
-                if !canEnable { pause("Compatibility or setup requires review") }
+                if !canEnable || !nativeReady { pause("Compatibility or setup requires review") }
                 else if checkOwnership() { recalculate(apply: true) }
             }
             requestAutomaticLocationIfNeeded(force: true)
@@ -200,6 +208,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleRotation() {
         if configuration.rotationEnabled { pause("By you"); return }
         guard canEnable else { showSettings(); return }
+        guard nativeReady else { checkCompatibilityAndEnable(); return }
         if let receipt = configuration.receipt {
             do {
                 if try adapter.hasExternalChange(since: receipt) {
@@ -235,14 +244,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recalculate(apply: true)
     }
     private func applyCurrentScene() {
-        guard !readOnly, canEnable, let set = selectedSet, let phase = schedule?.phase,
+        guard !readOnly, canEnable, nativeReady, let set = selectedSet, let phase = schedule?.phase,
               let asset = set.asset(for: phase, mapping: mapping(for: set)), asset.isDownloaded else {
-            if configuration.rotationEnabled { pause("Scene or native verification unavailable") }; return
+            if configuration.rotationEnabled { pause("Scene or compatibility check unavailable") }; return
         }
         // Every native write runs synchronously on the main actor through this gateway.
         let startedAt = Date()
         var producedReceipt: OwnershipReceipt?
         do {
+            let lease = try NativeOperationLease(directory: AppStorage.directory)
+            defer { lease.release() }
             if let receipt = configuration.receipt, try !adapter.hasExternalChange(since: receipt) {
                 let current = try adapter.inspect()
                 inspection = current
@@ -283,19 +294,43 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private func recoverPendingApply() {
         do {
-            guard let pending = try AppStorage.loadPendingApply() else { return }
+            let candidates = [AppStorage.pendingApplyURL, AppStorage.pendingSmokeURL].filter {
+                FileManager.default.fileExists(atPath: $0.path)
+            }
+            guard let pendingURL = candidates.first else { pendingApply = nil; return }
+            guard candidates.count == 1 else {
+                configurationLoadError = "Multiple interrupted operations need recovery. Rotation stays paused; recovery records are retained."
+                configuration.rotationEnabled = false
+                return
+            }
+            guard let pending = try AppStorage.loadPendingApply(at: pendingURL) else { return }
             pendingApply = pending
             configuration.rotationEnabled = false
+            let lease: NativeOperationLease
+            do { lease = try NativeOperationLease(directory: AppStorage.directory) }
+            catch AppleWallpaperError.transactionBusy {
+                message = "A compatibility check is still finishing. Rotation stays paused."
+                _ = persist(); return
+            }
+            defer { lease.release() }
+            // The helper may have advanced or removed its stage before we acquired the lease.
+            guard let pending = try AppStorage.loadPendingApply(at: pendingURL) else { pendingApply = nil; return }
+            pendingApply = pending
             timer?.invalidate(); timer = nil
             configuration.pauseReason = "Interrupted wallpaper update needs review"
-            let recovered = pending.receipt ?? freshRecovery(assetID: pending.assetID, startedAt: pending.startedAt)
-            guard let recovered, recovered.assetID == pending.assetID, recovered.osBuild == AppStorage.osBuild else {
+            var recovered = pending.receipt ?? freshRecovery(assetID: pending.assetID, startedAt: pending.startedAt)
+            var recoveredPrevious = false
+            if recovered == nil, let previous = pending.previousReceipt,
+               previous.osBuild == AppStorage.osBuild, try !adapter.hasExternalChange(since: previous) {
+                recovered = previous; recoveredPrevious = true
+            }
+            guard let recovered, (recoveredPrevious || recovered.assetID == pending.assetID), recovered.osBuild == AppStorage.osBuild else {
                 message = "An interrupted native update has uncertain recovery provenance. Its pending record and native backups are retained; review recovery before resuming."
                 _ = persist(); return
             }
             configuration.receipt = recovered
             if persist() {
-                try AppStorage.removePendingApply(); pendingApply = nil
+                try AppStorage.removePendingApply(at: pendingURL); pendingApply = nil
                 message = "Interrupted wallpaper ownership recovered. Rotation stays paused; Restore Previous Setup is available."
             }
         } catch {
@@ -337,6 +372,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         changeDebounce = Timer.scheduledTimer(timeInterval: 0.8, target: self, selector: #selector(nativeStoreChanged), userInfo: nil, repeats: false)
     }
     @objc private func nativeStoreChanged() {
+        if pendingApply != nil { recoverPendingApply() }
         guard configuration.rotationEnabled else { inspection = try? adapter.inspect(); render(); return }
         _ = checkOwnership(); render()
     }
@@ -374,6 +410,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         pause("Previous setup restored")
         do {
+            let lease = try NativeOperationLease(directory: AppStorage.directory)
+            defer { lease.release() }
             let result = try adapter.restore(receipt)
             if result.skippedCount == 0 { configuration.receipt = nil }
             message = "Restored \(result.restoredCount) values; preserved \(result.skippedCount) changed values."
@@ -381,65 +419,45 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch { message = error.localizedDescription }
         render()
     }
-    func verifyNative() {
-        guard !readOnly, configurationLoadError == nil, pendingApply == nil, !verificationRunning, let inspection else { return }
-        guard let set = selectedSet, !set.requiresReview || configuration.mappings[set.id] != nil,
+    /// Explicit Enable authorizes this one-time round trip. OS changes never
+    /// start it in the background; startup pauses until the user enables again.
+    private func checkCompatibilityAndEnable() {
+        guard canEnable, let inspection, let set = selectedSet,
               let day = set.asset(for: .day, mapping: mapping(for: set)), day.isDownloaded,
-              let night = set.asset(for: .night, mapping: mapping(for: set)), night.isDownloaded else {
-            message = "Review this set’s Day and Night scenes and download both before running its native check."; render(); return
-        }
-        if configuration.rotationEnabled { pause("Native verification in progress") }
-        if !AppStorage.smokePassed(for: inspection) {
-            let alert = NSAlert(); alert.messageText = "Check native wallpaper behavior?"
-            alert.informativeText = "This check temporarily applies a downloaded Apple scene, checks the wallpaper and screen saver settings, then restores your previous setup. Watch your monitors and desktop Spaces while the check runs."
-            alert.addButton(withTitle: "Run Check"); alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let process = Process()
-            process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/WallpaperDiagnostics")
-            process.arguments = ["--native-smoke", "--allow-live-changes", "--assets", day.id, night.id]
-            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { [weak self] process in
-                let succeeded = process.terminationStatus == 0
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.verificationProcess = nil
-                    if succeeded, AppStorage.smokePassed(for: inspection) { self.beginVisualVerification() }
-                    else { self.message = "Native check failed. Rotation stays disabled; check the native smoke report before retrying."; self.render() }
+              let night = set.asset(for: .night, mapping: mapping(for: set)), night.isDownloaded else { return }
+        let process = Process()
+        process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/WallpaperDiagnostics")
+        process.arguments = ["--native-smoke", "--allow-live-changes", "--assets", day.id, night.id]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            let succeeded = process.terminationStatus == 0
+            Task { @MainActor in
+                guard let self else { return }
+                self.verificationProcess = nil
+                self.inspection = try? self.adapter.inspect()
+                if succeeded, AppStorage.smokePassed(for: inspection), self.nativeReady {
+                    self.message = ""
+                    self.toggleRotation()
+                } else {
+                    self.recoverPendingApply()
+                    if self.pendingApply == nil && self.configurationLoadError == nil {
+                        self.message = "Wallpaper compatibility could not be confirmed. Rotation stays paused."
+                    }
+                    self.render()
                 }
             }
-            do { verificationProcess = process; try process.run(); message = "Native check running; rotation is paused."; render() }
-            catch { verificationProcess = nil; message = "Could not run the bundled native check: \(error.localizedDescription)"; render() }
-            return
         }
-        beginVisualVerification()
-    }
-    private func beginVisualVerification() {
-        guard let set = selectedSet,
-              let asset = set.asset(for: .day, mapping: mapping(for: set)), asset.isDownloaded else {
-            message = "Select a downloaded Day scene before visually verifying this Mac."; render(); return
-        }
-        let startedAt = Date()
         do {
-            try AppStorage.invalidateVerification()
-            try AppStorage.savePendingVerification(PendingVisualVerification(schemaVersion: 1, assetID: asset.id, startedAt: startedAt, receipt: nil))
-            visualAssetID = asset.id
-            let receipt = try adapter.apply(assetID: asset.id, previous: nil)
-            visualReceipt = receipt
-            try AppStorage.savePendingVerification(PendingVisualVerification(schemaVersion: 1, assetID: asset.id, startedAt: startedAt, receipt: receipt))
-            inspection = try adapter.inspect()
-            message = "A temporary Day scene is applied. Inspect every monitor, Space and the screen saver, then restore it."
-            showVisualPanel()
+            verificationProcess = process
+            try process.run()
+            message = "Checking compatibility; the Day and Night scenes will briefly appear, then your setup will be restored."
+            render()
         } catch {
-            visualReceipt = freshRecovery(assetID: asset.id, startedAt: startedAt)
-            message = "Visual test could not complete: \(error.localizedDescription)."
-            if visualReceipt != nil { showVisualPanel(); _ = finishVisualVerification(record: false) }
-            else if visualAssetID != nil {
-                recoveryUncertain = true
-                message += " Recovery provenance is uncertain; the pending journal is retained. Review the saved recovery data before enabling rotation."
-                showVisualPanel()
-            }
+            verificationProcess = nil
+            message = "Could not check wallpaper compatibility: \(error.localizedDescription)"
+            render()
         }
-        render()
     }
     private func recoverPendingVisualVerification() {
         do {
@@ -494,6 +512,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !readOnly else { return false }
         guard !recoveryUncertain else { message = "Recovery provenance is uncertain. The pending journal and backups are retained; review recovery before quitting."; render(); return false }
         do {
+            let lease = try NativeOperationLease(directory: AppStorage.directory)
+            defer { lease.release() }
             var skipped = 0
             if let receipt = visualReceipt { skipped = try adapter.restore(receipt).skippedCount }
             else if record { message = "A recovery receipt is required before confirming this check."; render(); return false }

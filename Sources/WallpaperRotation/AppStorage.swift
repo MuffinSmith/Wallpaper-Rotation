@@ -16,12 +16,7 @@ struct AppConfiguration: Codable {
 typealias NativeVerification = NativeVerificationRecord
 typealias NativeSmokeReport = NativeSmokeRecord
 
-struct PendingVisualVerification: Codable {
-    let schemaVersion: Int
-    let assetID: String
-    let startedAt: Date
-    let receipt: OwnershipReceipt?
-}
+typealias PendingVisualVerification = PendingWallpaperOperation
 
 enum AppStorage {
     static var directory: URL {
@@ -32,6 +27,7 @@ enum AppStorage {
     static var verificationURL: URL { directory.appendingPathComponent("native-verification.json") }
     static var smokeReportURL: URL { directory.appendingPathComponent("native-smoke-report.json") }
     static var pendingVerificationURL: URL { directory.appendingPathComponent("pending-verification.json") }
+    static var pendingSmokeURL: URL { directory.appendingPathComponent("pending-smoke.json") }
     static var pendingApplyURL: URL { directory.appendingPathComponent("pending-apply.json") }
     static func loadPendingVerification() throws -> PendingVisualVerification? {
         try loadPending(at: pendingVerificationURL)
@@ -103,8 +99,8 @@ enum AppStorage {
         return NativeVerificationPolicy.isVerified(record: value, smoke: report,
             currentOSBuild: osBuild, currentStoreSchema: inspection.schemaDescription)
     }
-    static func smokePassed(for inspection: StoreInspection) -> Bool {
-        guard let data = try? Data(contentsOf: smokeReportURL),
+    static func smokePassed(for inspection: StoreInspection, reportURL: URL = smokeReportURL) -> Bool {
+        guard let data = try? Data(contentsOf: reportURL),
               let value = try? JSONDecoder().decode(NativeSmokeReport.self, from: data) else { return false }
         return NativeVerificationPolicy.smokePassed(smoke: value,
             currentOSBuild: osBuild, currentStoreSchema: inspection.schemaDescription)
