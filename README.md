@@ -57,6 +57,11 @@ building. It does not create certificates, alter Keychain, or notarize a release
 The menu shows the actual scene and next transition. Pausing leaves the current
 wallpaper in place. A manual wallpaper change pauses rotation across relaunches.
 All monitors and Spaces share the selected scheduled scene while rotation runs.
+Changing a ready set while rotation is enabled updates the wallpaper immediately.
+During an update, Settings remains usable and shows its progress. Further set or
+scene changes replace the queued choice; Pause stops future updates immediately.
+Quit finishes the in-progress transaction before exiting and preserves your
+rotation preference for the next launch.
 
 ## Updates and recovery
 

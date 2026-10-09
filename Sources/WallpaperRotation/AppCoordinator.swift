@@ -38,27 +38,37 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var recoveryUncertain = false
     private var pendingApply: PendingVisualVerification?
     private var downloadTask: Task<Void, Never>?
-    private var downloader: WallpaperDownloader?
+    private var downloader: (any WallpaperDownloading)?
     private var availabilityObserver: AssetAvailabilityObserver?
     private(set) var downloadingSetID: String?
     private(set) var downloadProgress: WallpaperDownloadProgress?
     private var browsedSetID: String?
+    private let nativeWorker: NativeApplyWorker
+    private var nativeTask: Task<Void, Never>?
+    private var queuedNativeApply = false
+    private var catalogRefreshPending = false
+    private var nativeTransactionID: UUID?
+    var nativeOperationRunning: Bool { nativeTask != nil }
     struct EnableEnvironment {
         let isReady: () -> Bool
         let saveConfiguration: (AppConfiguration) throws -> Void
-        let applyAsset: (String) -> Void
+        let applyAsset: ((String) -> Void)?
         let checkCompatibility: (@escaping () -> Void) -> Void
         let showSettings: () -> Void
+        var replyToTermination: ((Bool) -> Void)? = nil
+        var makeDownloader: (() -> any WallpaperDownloading)? = nil
     }
     private let enableEnvironment: EnableEnvironment?
 
     override convenience init() {
-        self.init(configuration: AppConfiguration(), sets: [], enableEnvironment: nil)
+        self.init(configuration: AppConfiguration(), sets: [], enableEnvironment: nil, nativeWorker: NativeApplyWorker())
     }
-    init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?) {
+    init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?,
+         nativeWorker: NativeApplyWorker = NativeApplyWorker()) {
         self.configuration = configuration
         self.sets = sets
         self.enableEnvironment = enableEnvironment
+        self.nativeWorker = nativeWorker
         super.init()
     }
     var downloadRunning: Bool { downloadTask != nil }
@@ -73,7 +83,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var nativeReady: Bool { enableEnvironment?.isReady() ?? (inspection.map { AppStorage.smokePassed(for: $0) } ?? false) }
     private var canPrepareRotation: Bool {
-        !readOnly && !terminationPending && configurationLoadError == nil && pendingApply == nil && (enableEnvironment != nil || watchFD >= 0) && !verificationRunning && (enableEnvironment != nil || inspection != nil) && configuration.lastFix != nil
+        !readOnly && !terminationPending && !nativeOperationRunning && configurationLoadError == nil && pendingApply == nil && (enableEnvironment != nil || watchFD >= 0) && !verificationRunning && (enableEnvironment != nil || inspection != nil) && configuration.lastFix != nil
     }
     // Runtime application is governed by the committed selection, even while another set is browsed.
     var canEnable: Bool { canPrepareRotation && ready(selectedSet) }
@@ -91,6 +101,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var readiness: String {
         if readOnly { return "Read-only preview: no settings or wallpaper changes." }
+        if nativeOperationRunning { return configuration.rotationEnabled ? "Updating wallpaper…" : "Finishing wallpaper update; rotation is paused." }
         if pendingApply != nil { return "An interrupted wallpaper update needs recovery; rotation is disabled." }
         if verificationProcess != nil { return "Native check running; rotation is paused." }
         if visualAssetID != nil { return recoveryUncertain ? "A previous visual check needs recovery; rotation is disabled." : "Inspect the temporary Day scene, then confirm or cancel and restore it." }
@@ -212,6 +223,21 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         downloadTask?.cancel(); downloader?.cancel()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let operation = nativeTask {
+            if !terminationPending {
+                terminationPending = true
+                timer?.invalidate(); timer = nil
+                queuedNativeApply = false
+                let pendingDownload = downloadTask
+                cancelDownload()
+                Task { @MainActor in
+                    await operation.value
+                    await pendingDownload?.value
+                    self.replyToTermination(true)
+                }
+            }
+            return .terminateLater
+        }
         if verificationProcess != nil { message = "Wait for the native check to restore your setup before quitting."; render(); return .terminateCancel }
         if visualAssetID != nil && !finishVisualVerification(record: false) { return .terminateCancel }
         if let pendingDownload = downloadTask {
@@ -221,12 +247,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Task { @MainActor in
                     await pendingDownload.value
                     // Give the download's cleanup defers time to remove its staging file.
-                    NSApp.reply(toApplicationShouldTerminate: true)
+                    self.replyToTermination(true)
                 }
             }
             return .terminateLater
         }
         return .terminateNow
+    }
+    private func replyToTermination(_ allowed: Bool) {
+        if let reply = enableEnvironment?.replyToTermination { reply(allowed) }
+        else { NSApp.reply(toApplicationShouldTerminate: allowed) }
     }
     func menuWillOpen(_ menu: NSMenu) {
         menuTracking = false
@@ -242,6 +272,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return WallpaperPhase.allCases.allSatisfy { set.asset(for: $0, mapping: mapping(for: set))?.isDownloaded == true }
     }
     func refreshCatalog() {
+        // The worker owns native readback while a transaction is in progress.
+        guard !nativeOperationRunning else { catalogRefreshPending = true; render(); return }
+        if enableEnvironment != nil { recalculate(apply: false); return }
         do {
             sets = try AppleSetCatalog().discover()
             inspection = try adapter.inspect()
@@ -272,7 +305,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !missing.isEmpty else { message = "All scenes are downloaded."; refreshAvailability(); return }
         let available = missing.filter { $0.downloadURL != nil }
         guard !available.isEmpty else { openWallpaperSettings(); return }
-        let service = WallpaperDownloader()
+        let service: any WallpaperDownloading = enableEnvironment?.makeDownloader?() ?? WallpaperDownloader()
         downloader = service
         downloadingSetID = id
         downloadProgress = WallpaperDownloadProgress(completedCount: 0, totalCount: available.count)
@@ -380,7 +413,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             catch { schedule = nil; message = error.localizedDescription; if configuration.rotationEnabled { pause("Solar schedule unavailable") } }
         } else { schedule = nil }
         if apply && configuration.rotationEnabled { applyCurrentScene() }
-        if configuration.rotationEnabled, let next = schedule?.nextTransition {
+        if configuration.rotationEnabled, !terminationPending, let next = schedule?.nextTransition {
             timer = Timer.scheduledTimer(timeInterval: max(1, next.date.timeIntervalSinceNow), target: self,
                                         selector: #selector(transitionReached), userInfo: nil, repeats: false)
         }
@@ -392,55 +425,59 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recalculate(apply: true)
     }
     private func applyCurrentScene() {
+        guard !terminationPending else { return }
+        if nativeOperationRunning { queuedNativeApply = true; return }
         guard !readOnly, canEnable, nativeReady, let set = selectedSet, let phase = schedule?.phase,
               let asset = set.asset(for: phase, mapping: mapping(for: set)), asset.isDownloaded else {
             if configuration.rotationEnabled { pause("Scene or compatibility check unavailable") }; return
         }
-        if let enableEnvironment { enableEnvironment.applyAsset(asset.id); return }
-        // Every native write runs synchronously on the main actor through this gateway.
-        let startedAt = Date()
-        var producedReceipt: OwnershipReceipt?
-        do {
-            let lease = try NativeOperationLease(directory: AppStorage.directory)
-            defer { lease.release() }
-            if let receipt = configuration.receipt, try !adapter.hasExternalChange(since: receipt) {
-                let current = try adapter.inspect()
-                inspection = current
-                if !current.selections.isEmpty && current.selections.values.allSatisfy({ $0 == asset.id }) {
-                    return
+        if let apply = enableEnvironment?.applyAsset { apply(asset.id); return }
+        let previous = configuration.receipt
+        queuedNativeApply = false
+        let transactionID = UUID()
+        nativeTransactionID = transactionID
+        nativeTask = Task { [weak self, nativeWorker] in
+            let result = await nativeWorker.apply(assetID: asset.id, previous: previous, transactionID: transactionID)
+            guard let self else { _ = await nativeWorker.complete(result, persisted: false); return }
+            guard self.nativeTransactionID == transactionID else {
+                _ = await nativeWorker.complete(result, persisted: false); return
+            }
+            // Only merge ownership. Preserve newer set choices and the user's Pause action.
+            if let receipt = result.receipt { self.configuration.receipt = receipt }
+            if let inspection = result.inspection { self.inspection = inspection }
+            self.pendingApply = result.pending
+            if let error = result.error {
+                self.message = error
+                self.configuration.rotationEnabled = false
+                self.configuration.pauseReason = "Native wallpaper update failed"
+                self.timer?.invalidate(); self.timer = nil
+            }
+            let persisted = self.persist()
+            let completion = await nativeWorker.complete(result, persisted: persisted)
+            self.pendingApply = completion.pending
+            if let error = completion.error { self.message += " Recovery needs attention: \(error)" }
+            if completion.pending != nil || completion.error != nil {
+                self.configuration.rotationEnabled = false
+                self.timer?.invalidate(); self.timer = nil
+                if persisted {
+                    self.configuration.pauseReason = "Native recovery needs review"
+                    _ = self.persist()
                 }
             }
-            let journal = PendingVisualVerification(schemaVersion: 1, assetID: asset.id, startedAt: startedAt, receipt: nil)
-            try AppStorage.savePendingApply(journal)
-            pendingApply = journal
-            let receipt = try adapter.apply(assetID: asset.id, previous: configuration.receipt)
-            producedReceipt = receipt
-            let completed = PendingVisualVerification(schemaVersion: 1, assetID: asset.id, startedAt: startedAt, receipt: receipt)
-            pendingApply = completed
-            try AppStorage.savePendingApply(completed)
-            configuration.receipt = receipt
-            inspection = try adapter.inspect()
-            if !persist() {
-                do { _ = try adapter.restore(receipt) } catch { message += " Restore also failed: \(error.localizedDescription)" }
-                configuration.rotationEnabled = false; configuration.pauseReason = "Configuration could not be saved"
-            } else {
-                try AppStorage.removePendingApply()
-                pendingApply = nil
+            self.nativeTask = nil
+            self.nativeTransactionID = nil
+            if self.catalogRefreshPending {
+                self.catalogRefreshPending = false
+                if !self.terminationPending { self.refreshAvailability() }
             }
-        } catch {
-            // A commit/reload may fail after storage changed. Retain the adapter’s
-            // pre-commit recovery receipt so conditional Restore remains available.
-            let recovery = producedReceipt ?? (pendingApply == nil ? nil : freshRecovery(assetID: asset.id, startedAt: startedAt))
-            if let recovery { configuration.receipt = recovery }
-            message = error.localizedDescription
-            configuration.rotationEnabled = false; configuration.pauseReason = "Native wallpaper update failed"
-            if persist(), recovery != nil {
-                do { try AppStorage.removePendingApply(); pendingApply = nil }
-                catch { message += " The recovery journal is retained: \(error.localizedDescription)." }
-            } else if pendingApply != nil { message += " Recovery provenance or persistence needs review; the pending journal and native backups are retained." }
-            render()
+            if self.configuration.rotationEnabled && self.queuedNativeApply && !self.terminationPending {
+                self.recalculate(apply: true)
+            } else { self.render() }
+            if self.enableEnvironment == nil { self.scheduleNativeCheck() }
         }
+        render()
     }
+
     private func recoverPendingApply() {
         do {
             let candidates = [AppStorage.pendingApplyURL, AppStorage.pendingSmokeURL].filter {
@@ -489,6 +526,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     private func checkOwnership() -> Bool {
+        guard !nativeOperationRunning else { queuedNativeApply = true; return false }
         guard !readOnly, let receipt = configuration.receipt else { return true }
         do {
             inspection = try adapter.inspect()
@@ -521,7 +559,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         changeDebounce = Timer.scheduledTimer(timeInterval: 0.8, target: self, selector: #selector(nativeStoreChanged), userInfo: nil, repeats: false)
     }
     @objc private func nativeStoreChanged() {
-        if pendingApply != nil { recoverPendingApply() }
+        guard !nativeOperationRunning else { catalogRefreshPending = true; return }
+        // Failed in-session operations stay paused for review. Startup and compatibility
+        // completion reconcile their own journals explicitly, outside notification storms.
+        if pendingApply != nil { render(); return }
         guard configuration.rotationEnabled else { inspection = try? adapter.inspect(); render(); return }
         _ = checkOwnership(); render()
     }
@@ -556,22 +597,43 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
     func restorePreviousSetup() {
-        guard !readOnly, let receipt = configuration.receipt else { return }
+        guard !readOnly, !nativeOperationRunning, let receipt = configuration.receipt else { return }
         let alert = NSAlert(); alert.messageText = "Restore Previous Setup?"
         alert.informativeText = "Restore only wallpaper and screen saver values still owned by this app. Changes you made elsewhere will be preserved. Rotation will pause."
         alert.addButton(withTitle: "Restore"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        beginRestore(receipt)
+    }
+    func beginRestore(_ receipt: OwnershipReceipt) {
+        guard !readOnly, !nativeOperationRunning else { return }
         pause("Previous setup restored")
-        do {
-            let lease = try NativeOperationLease(directory: AppStorage.directory)
-            defer { lease.release() }
-            let result = try adapter.restore(receipt)
-            if result.skippedCount == 0 { configuration.receipt = nil }
-            message = "Restored \(result.restoredCount) values; preserved \(result.skippedCount) changed values."
-            _ = persist()
-        } catch { message = error.localizedDescription }
+        let transactionID = UUID()
+        nativeTransactionID = transactionID
+        nativeTask = Task { [weak self, nativeWorker] in
+            do {
+                let result = try await nativeWorker.restore(receipt, transactionID: transactionID)
+                let readback = try? await nativeWorker.inspect()
+                if let self, self.nativeTransactionID == transactionID {
+                    if result.skippedCount == 0 { self.configuration.receipt = nil }
+                    if let readback { self.inspection = readback }
+                    self.message = "Restored \(result.restoredCount) values; preserved \(result.skippedCount) changed values."
+                    _ = self.persist()
+                }
+            } catch { self?.message = error.localizedDescription }
+            await nativeWorker.completeRestore(transactionID: transactionID)
+            if self?.nativeTransactionID == transactionID {
+                self?.nativeTask = nil
+                self?.nativeTransactionID = nil
+                if let self, self.catalogRefreshPending {
+                    self.catalogRefreshPending = false
+                    if !self.terminationPending { self.refreshAvailability() }
+                }
+                self?.render()
+            }
+        }
         render()
     }
+
     /// Explicit Enable authorizes this one-time round trip. OS changes never
     /// start it in the background; startup pauses until the user enables again.
     private func checkCompatibilityAndEnable(selection: RotationSelection) {

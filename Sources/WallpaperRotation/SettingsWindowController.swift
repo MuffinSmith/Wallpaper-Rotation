@@ -324,7 +324,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         moreButton.isEnabled = !coordinator.readOnly
         restoreButton.isHidden = coordinator.configuration.receipt == nil
-        restoreButton.isEnabled = !coordinator.readOnly && !coordinator.verificationRunning
+        restoreButton.isEnabled = !coordinator.readOnly && !coordinator.verificationRunning && !coordinator.nativeOperationRunning
     }
     private func renderDownloads(set: WallpaperSet?, needsReview: Bool, selectedDownloaded: Bool) {
         let missing = set?.assets.filter { !$0.isDownloaded } ?? []

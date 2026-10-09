@@ -34,6 +34,15 @@ UI readiness must represent observed success. Native compatibility is checked on
 explicit Enable; fixture tests cannot produce a passing live smoke report. Keep desired selections distinct from
 actual native state and reflect startup registration from macOS's own service.
 
+Native transactions can wait for file locks, disk writes and Apple's wallpaper
+process. Keep them off the main actor, serialize each apply/restore episode, and
+retain its operation lease until ownership persistence and journal cleanup finish.
+Render cached native state during an operation. A later selection may replace the
+queued request; Pause takes effect immediately, and Quit waits for finalization.
+Responsiveness fixtures must use the production adapter with a delayed reload and
+dispatch native control actions while a main run-loop timer continues to fire.
+An instantaneous fake apply cannot establish this property.
+
 ## Pull requests
 
 Keep main buildable. Include the concrete behavior change and relevant test
