@@ -55,7 +55,7 @@ public struct AppleSetCatalog {
         }
         var seen = Set<String>()
         var sets: [WallpaperSet] = []
-        for category in catalog.categories {
+        for category in catalog.categories where !category.isAppearanceOrColorCollection {
             for group in category.subcategories {
                 guard seen.insert(group.id).inserted else { continue }
                 let members = catalog.assets.filter { $0.subcategories.contains(group.id) }
@@ -110,7 +110,17 @@ public struct AppleSetCatalog {
     }
 
     private struct Manifest: Decodable { let version: Int; let assets: [Entry]; let categories: [Category] }
-    private struct Category: Decodable { let subcategories: [Group] }
+    private struct Category: Decodable {
+        let id: String?
+        let localizedNameKey: String?
+        let subcategories: [Group]
+
+        // These collections vary appearance/orientation or color rather than
+        // outdoor scenes. Match catalog identifiers, never displayed names.
+        var isAppearanceOrColorCollection: Bool {
+            id == "dynamic-aerials" || localizedNameKey == "AerialCategoryDynamic" || localizedNameKey == "AerialCategoryMac"
+        }
+    }
     private struct Group: Decodable { let id: String; let localizedNameKey: String }
     private struct Entry: Decodable {
         let id: String; let shotID: String; let accessibilityLabel: String
