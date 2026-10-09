@@ -1,0 +1,46 @@
+# Development guide
+
+The project has four Swift Package targets:
+
+| Target | Responsibility |
+| --- | --- |
+| RotationCore | Value types and offline solar phase calculations; no macOS settings access. |
+| AppleWallpaper | Native catalog discovery and guarded wallpaper-store transactions. |
+| WallpaperRotation | AppKit interface, location events, persistence, and the single transition timer. |
+| WallpaperDiagnostics | Read-only inspection and explicitly opt-in native round-trip checks. |
+
+Run `bash scripts/test.sh` for fixture tests and `bash scripts/build-app.sh` for
+an ad-hoc signed release app. Command Line Tools are sufficient; no external
+Swift packages are used. A persistent signing identity can be supplied through
+`SIGNING_IDENTITY` without changing source code.
+
+## Changing behavior
+
+Keep solar decisions independent of local calendar presentation. All phase
+shoulders are 3,600 elapsed seconds. Tests use independently published solar
+times and synthetic boundary cases.
+
+Discover Apple collections from category/subcategory membership. Treat Apple's
+asset IDs and available media as runtime data. New or ambiguous collections
+require reviewed phase mappings; do not infer times from gallery order.
+
+The wallpaper store is undocumented. Extend its adapter only with fixtures and
+observed native evidence. Preserve unrelated fields and reject unknown structures.
+Use the cooperative transaction lock, stale-read checks, ownership receipts and
+conditional restore together; none provides a transaction with Apple's writer.
+
+UI readiness must represent observed success. A passing file-based test cannot
+create a visual verification marker. Keep desired selections distinct from
+actual native state and reflect startup registration from macOS's own service.
+
+## Pull requests
+
+Keep main buildable. Include the concrete behavior change and relevant test
+results. Native display checks, permission behavior and resource measurements
+must be described separately from fixture tests; document pending evidence.
+Never commit Apple's media, local coordinates, recovery backups, compiled apps,
+private signing keys, or temporary build/review logs.
+
+CI uses the [official Xcode 27 arm64 runner image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md),
+which supplies macOS 27. Check the PR’s workflow result separately from local tests.
+When updating the deployment target, update and verify this runner choice too.
