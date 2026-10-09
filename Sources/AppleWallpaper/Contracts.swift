@@ -66,3 +66,17 @@ public protocol NativeWallpaperApplying {
     func hasExternalChange(since receipt: OwnershipReceipt) throws -> Bool
     func restore(_ receipt: OwnershipReceipt) throws -> RestoreResult
 }
+
+/// Written before any native operation, so startup can recover its original
+/// baseline even if the process stops before normal configuration is saved.
+public struct PendingWallpaperOperation: Codable, Sendable {
+    public let schemaVersion: Int
+    public let assetID: String
+    public let startedAt: Date
+    public let receipt: OwnershipReceipt?
+    public let previousReceipt: OwnershipReceipt?
+    public init(schemaVersion: Int = 1, assetID: String, startedAt: Date, receipt: OwnershipReceipt?, previousReceipt: OwnershipReceipt? = nil) {
+        self.schemaVersion = schemaVersion; self.assetID = assetID
+        self.startedAt = startedAt; self.receipt = receipt; self.previousReceipt = previousReceipt
+    }
+}

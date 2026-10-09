@@ -12,11 +12,13 @@ The native adapter separately retains its ownership receipt before replacing the
 wallpaper store. On launch, a matching recovery receipt is adopted and rotation
 stays paused. Use Restore Previous Setup or inspect the result before resuming.
 The original baseline is retained even if the process stopped before saving its
-normal configuration.
+normal configuration. The compatibility helper uses `pending-smoke.json` for
+each stage, retaining the original baseline across its Night and Day checks.
+Recovery waits while another operation holds the native-operation lease.
 
 If receipt identity or timing cannot be established, the app leaves rotation
 disabled and retains the pending record and backups. It does not guess which
-settings it owns. A fresh OS build also requires fresh native verification.
+settings it owns. A fresh OS build also requires a compatibility check on explicit Enable.
 
 ## Starting over when recovery is uncertain
 
@@ -27,10 +29,11 @@ settings it owns. A fresh OS build also requires fresh native verification.
 3. In Apple's Wallpaper settings, explicitly choose the wallpaper and screen
    saver setup you want to use as your new baseline.
 4. In the original app-support folder, rename any existing `config.json`,
-   `pending-apply.json`, `pending-verification.json` and `native-verification.json`
+   `pending-apply.json`, `pending-smoke.json`, `pending-verification.json`,
+   `native-smoke-report.json` and `native-verification.json`
    by adding `.saved` to their names. Keep the `Backups` folder intact.
 5. Reopen the app. It starts with rotation disabled. Select your set and location,
-   complete Verify on This Mac, and explicitly enable rotation again.
+   then explicitly enable Rotation to run the compatibility check and resume.
 
 This resets the app's ownership claim without overwriting Apple's current
 settings. Raw `Index-*.plist` backups are inspection/recovery evidence; replacing

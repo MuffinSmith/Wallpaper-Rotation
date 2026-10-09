@@ -38,11 +38,12 @@ building. It does not create certificates, alter Keychain, or notarize a release
 2. Select an Apple collection. Golden Gate is the default. Download any missing
    scenes through Apple's Wallpaper settings. Review proposed role mappings
    for unfamiliar sets.
-3. Choose **Use Current Location** or provide coordinates. A saved location supports
+3. Use **Change…** in Location to choose this Mac’s location or provide coordinates. A saved location supports
    temporary outages; location updates use occasional one-shot requests.
-4. Use **Verify on This Mac** to run the native check and complete the visual
-   confirmation. Then enable rotation. First launch never changes wallpaper.
-5. Optionally enable Start at Login. Its checkbox reflects macOS's actual
+4. Enable **Rotation**. If this OS build has not been checked, the app briefly
+   tests Day and Night, restores your setup, then starts the current scene.
+   First launch leaves wallpaper unchanged until you enable rotation.
+5. Optionally enable Start at Login. Its switch reflects macOS's actual
    registration status; an unsigned/ad-hoc build may require approval or fail.
 
 The menu shows the actual scene and next transition. Pausing leaves the current
@@ -54,7 +55,8 @@ All monitors and Spaces share the selected scheduled scene while rotation runs.
 Apple does not provide a supported public interface for selecting native aerial
 movies across Spaces. This app validates the current wallpaper store, preserves
 unrelated fields, and stops on unsupported structures or conflicting changes.
-Every OS build requires a fresh native verification. Compatibility is checked;
+After an OS update, rotation pauses. Enable it to run a fresh native compatibility
+check before scheduling resumes. Compatibility is checked;
 it is **not guaranteed across future macOS updates**.
 
 Normal restore conditionally reverses only values the app still owns. It leaves

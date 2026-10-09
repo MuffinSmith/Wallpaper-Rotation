@@ -79,4 +79,76 @@ struct AppStorageTests {
         } catch { #expect(error is DecodingError) }
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
+
+    private var compatibilityInspection: StoreInspection {
+        StoreInspection(fingerprint: "fixture-fingerprint", selections: [:], schemaDescription: "fixture-store-v1")
+    }
+
+    private func writeSmokeReport(to url: URL, schema: Int = 1, osBuild: String? = nil,
+                                  storeSchema: String = "fixture-store-v1", passed: Bool = true,
+                                  checkedAt: String = "2026-10-08T18:00:00Z") throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        // A hand-authored fixture verifies the persisted record boundary rather
+        // than using the production encoder to construct its own expected data.
+        let record: [String: Any] = ["schemaVersion": schema, "osBuild": osBuild ?? AppStorage.osBuild,
+                                     "storeSchema": storeSchema, "passed": passed, "checkedAt": checkedAt]
+        try JSONSerialization.data(withJSONObject: record).write(to: url)
+    }
+
+    @Test func passingCompatibilityReportNeedsNoVisualVerificationMarker() throws {
+        let folder = fixtureFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reportURL = folder.appendingPathComponent("native-smoke-report.json")
+        let build = AppStorage.osBuild
+        try #require(!build.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && build.lowercased() != "unknown")
+        try writeSmokeReport(to: reportURL, osBuild: build)
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("native-verification.json").path))
+        #expect(AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == ["native-smoke-report.json"])
+    }
+
+    @Test func missingOrCorruptCompatibilityReportFailsClosed() throws {
+        let folder = fixtureFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reportURL = folder.appendingPathComponent("native-smoke-report.json")
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        // Create the private fixture folder without creating any app marker.
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        for corrupt in ["not JSON", "{", "{}", "[]"] {
+            try Data(corrupt.utf8).write(to: reportURL)
+            #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+            #expect(FileManager.default.fileExists(atPath: reportURL.path))
+        }
+    }
+
+    @Test func incompatibleOrMalformedCompatibilityReportsFailClosed() throws {
+        let folder = fixtureFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reportURL = folder.appendingPathComponent("native-smoke-report.json")
+        try writeSmokeReport(to: reportURL, osBuild: AppStorage.osBuild + "-different-build")
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        for unknown in ["unknown", "", " "] {
+            try writeSmokeReport(to: reportURL, osBuild: unknown)
+            #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        }
+        try writeSmokeReport(to: reportURL, storeSchema: "fixture-store-v2")
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        try writeSmokeReport(to: reportURL, schema: 2)
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        try writeSmokeReport(to: reportURL, checkedAt: "not-a-date")
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+    }
+
+    @Test func failedNativeRecheckRevokesPreviouslyPassingCompatibility() throws {
+        let folder = fixtureFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reportURL = folder.appendingPathComponent("native-smoke-report.json")
+        try writeSmokeReport(to: reportURL)
+        #expect(AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        try writeSmokeReport(to: reportURL, passed: false, checkedAt: "2026-10-08T18:02:00Z")
+        #expect(!AppStorage.smokePassed(for: compatibilityInspection, reportURL: reportURL))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == ["native-smoke-report.json"])
+    }
 }

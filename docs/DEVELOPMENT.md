@@ -27,10 +27,11 @@ require reviewed phase mappings; do not infer times from gallery order.
 The wallpaper store is undocumented. Extend its adapter only with fixtures and
 observed native evidence. Preserve unrelated fields and reject unknown structures.
 Use the cooperative transaction lock, stale-read checks, ownership receipts and
-conditional restore together; none provides a transaction with Apple's writer.
+conditional restore together. The whole-operation lease serializes helpers, app
+writes and recovery; reread pending stages under that lease. None provides a transaction with Apple's writer.
 
-UI readiness must represent observed success. A passing file-based test cannot
-create a visual verification marker. Keep desired selections distinct from
+UI readiness must represent observed success. Native compatibility is checked on
+explicit Enable; fixture tests cannot produce a passing live smoke report. Keep desired selections distinct from
 actual native state and reflect startup registration from macOS's own service.
 
 ## Pull requests
