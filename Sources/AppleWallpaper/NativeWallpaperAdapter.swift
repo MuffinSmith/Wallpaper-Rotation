@@ -332,16 +332,6 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
     }
 
     public static func reloadWallpaperAgent() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        process.arguments = ["-u", NSUserName(), "-TERM", "WallpaperAgent"]
-        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-        let completed = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in completed.signal() }
-        try process.run()
-        guard completed.wait(timeout: .now() + 3) == .success else {
-            process.terminate(); throw AppleWallpaperError.reloadFailed("timeout")
-        }
-        guard process.terminationStatus == 0 else { throw AppleWallpaperError.reloadFailed("WallpaperAgent was not running") }
+        try WallpaperAgentReloader().reload()
     }
 }

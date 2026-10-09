@@ -184,3 +184,70 @@ Snark's first weighted bug-fix review scored 8.3/10 with no blocking findings
 (correctness 2.2, safety 2.2, maintainability 1.2, evidence 1.1, UI 0.8, updates 0.8).
 Private screenshots, configuration backups and local coordinates remain outside
 the repository. No new OS restart or morning transition was observed.
+
+## Responsive set changes 0.3.2
+
+The user reported a frozen interface when changing sets with rotation enabled.
+A live five-second sample taken afterward showed an idle AppKit event loop; it
+did not capture a persistent hang. A native Settings popup action using the
+production adapter against a disposable recognized store with a delayed reload
+reproduced temporary event-loop starvation: 0.424 seconds with zero 10 ms timer
+ticks. Earlier selection tests injected an instantaneous final apply and missed
+that behavior.
+
+Native apply and Restore now run through a serialized worker away from the main
+actor. Settings renders cached actual state and a busy status while the worker
+finishes its journaled transaction. Rapid selections coalesce; Pause takes effect
+immediately; Quit awaits native finalization and download cleanup while preserving
+the next-launch rotation preference. The operation lease spans receipt persistence
+and journal finalization. Failed cleanup leaves rotation paused with recovery
+evidence retained. A no-op request never rolls back an earlier native application
+when its configuration save fails.
+
+An authorized live episode then exposed a separate restart timing error: rapid
+changes could call `killall` while WallpaperAgent was between launchd restarts.
+The adapter now waits up to six monotonic seconds for the current user's exact
+process, with bounded child execution, explicit failures and cancellation. A
+failed termination is retried only after confirmed process absence; the first
+successful termination ends the request. Absence is never treated as success.
+
+109 integrated fixtures passed: 31 app/persistence/events/interface, 22 core,
+and 56 native/catalog/download/reload. Eight new interface tests use the production
+adapter, a recognized temporary store and one-second reload delays. Actual AppKit
+actions and main run-loop timers continue during native work. They cover rapid
+choices, scene Save, Refresh/menu calls, Pause, close/reopen, Restore, Quit with
+download cleanup, native errors, failed saves and denied journal cleanup. Fourteen
+reload tests cover transient absence, probe/termination races, deadlines, errors,
+and timeout/cancellation cleanup of disposable child processes. No fixture invokes
+live Apple process commands or changes wallpaper.
+
+The final private live episode passed in 5.395 seconds. With the normal app
+gracefully stopped and a separate private configuration/recovery directory, native
+Settings popup/switch actions exercised the same production worker and adapter.
+Rapid Golden Gate → Tahoe changes succeeded; a second cycle verified all 29
+current selectors and that Apple's aerial process opened each matching movie.
+Control dispatch took approximately 1–18 ms. Pause and Settings close/reopen
+worked, conditional Restore returned all 29 selectors to the starting Tahoe
+scene, the private journal was removed, and the real saved configuration remained
+byte-identical. Apple removed one native context during the earlier failed
+episodes; it was preserved as an external topology change, rather than replaced
+from a raw backup. The user's paused preference and original receipt stayed intact.
+
+Snark's second scored candidate reached 8.6/10 with no blocking findings after the
+live evidence (correctness 2.3, safety 2.2, maintainability 1.2, evidence 1.2,
+UI 0.8, updates 0.9). The first provisional score was 8.5 before the live restart
+timing failure was found and corrected. These are native AppKit action tests,
+not external mouse automation; Accessibility access was unavailable. They do not
+claim new verification of every Space, screen saver playback, an OS restart or a
+morning transition. Startup/legacy visual recovery retains its existing bounded
+synchronous path; normal apply/Restore and in-session events use the new boundary.
+
+The final 0.3.2 build 7 release passed plist lint and strict ad-hoc signature
+verification, then replaced the installed app at its existing Applications path.
+Normal launch preserved the real configuration byte-for-byte, including paused
+Tahoe, saved location, mappings and original ownership receipt; no pending records
+remained. The actual rendered Settings showed Tahoe Night, downloaded/ready,
+rotation off and Start at Login enabled. Four normal-release samples five seconds
+apart with Settings never opened showed 0.0% CPU and 53,872–53,920 KiB RSS
+(52.6–52.7 MiB). The under-50-MiB target remains open in issue #2. The prior app
+and private recovery evidence remain available outside the repository.
