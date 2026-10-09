@@ -13,6 +13,8 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
     private let lockTimeout: TimeInterval
     private let lock = NSRecursiveLock()
     private static let contextPrefix = "context:"
+    // Reserved receipt metadata; keeps ambiguous historical baselines intact.
+    private static let unrestorablePrefix = "context:adapterUnrestorable:"
 
     public init(
         storeURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist"),
@@ -50,11 +52,25 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
             if let previous, try changed(state, receipt: previous) { throw AppleWallpaperError.externalInterference }
             var root = state.root
             var original = previous?.originalValues ?? [:]
+            let projection = try previous.map { try ownershipProjection(state, values: $0.appliedValues) } ?? [:]
             var applied: [String: Data] = [:]
             for (path, slot) in state.slots {
-                if original[path] == nil { original[path] = slot.configuration }
                 let contextKey = Self.contextPrefix + path
-                if original[contextKey] == nil { original[contextKey] = slot.context }
+                if let previous, let sources = projection[path] {
+                    if let baseline = try originalBaseline(sources, values: previous.originalValues, target: slot) {
+                        // Retain all old paths as provenance, and add aliases only
+                        // after strict ownership equivalence has been established.
+                        if original[path] == nil { original[path] = baseline.configuration }
+                        if original[contextKey] == nil { original[contextKey] = baseline.context }
+                    } else {
+                        // Never adopt our currently managed movie as a fresh
+                        // baseline when a collapsed pair has incompatible originals.
+                        original[Self.unrestorablePrefix + path] = try encode(["sourcePaths": sources])
+                    }
+                } else {
+                    if original[path] == nil { original[path] = slot.configuration }
+                    if original[contextKey] == nil { original[contextKey] = slot.context }
+                }
                 var configuration = try dictionary(slot.configuration)
                 configuration["assetID"] = assetID
                 let updated = try encode(configuration)
@@ -78,33 +94,33 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
             let state = try read()
             var root = state.root
             var restored = 0; var skipped = 0
-            for (path, original) in receipt.originalValues where !path.hasPrefix(Self.contextPrefix) {
-                guard let slot = state.slots[path], let owned = receipt.appliedValues[path],
-                      let context = receipt.appliedValues[Self.contextPrefix + path],
-                      try equal(slot.configuration, owned), try equal(slot.context, context) else {
+            let projection = try ownershipProjection(state, values: receipt.appliedValues)
+            var accountedNodes = Set<String>()
+            var restoredValues: [String: Data] = [:]
+            for (path, sources) in projection {
+                accountedNodes.insert(nodePath(path))
+                guard let slot = state.slots[path],
+                      try owned(slot, matches: sources, values: receipt.appliedValues, allowingTypeProjection: sources != [path]),
+                      let baseline = try originalBaseline(sources, values: receipt.originalValues, target: slot) else {
                     skipped += 1; continue
                 }
-                root = try replacing(root, path: path, value: original)
+                root = try replacing(root, path: path, value: baseline.configuration)
+                restoredValues[path] = baseline.configuration
+                restoredValues[Self.contextPrefix + path] = slot.context
                 restored += 1
             }
+            // Historical aliases in an accounted node are provenance, not extra
+            // current selectors. Missing/incompatible nodes remain reported skips.
+            skipped += receipt.originalValues.keys.filter {
+                !$0.hasPrefix(Self.contextPrefix) && !accountedNodes.contains(nodePath($0))
+            }.count
             if restored > 0 {
                 try commit(root, expected: state.bytes)
-                // Verify only restored fields: unrelated later edits deliberately remain untouched.
-                func verifyRestored(_ result: State) throws {
-                    for (path, original) in receipt.originalValues where !path.hasPrefix(Self.contextPrefix) {
-                        if let before = state.slots[path], let owned = receipt.appliedValues[path],
-                           let context = receipt.appliedValues[Self.contextPrefix + path],
-                           try equal(before.configuration, owned), try equal(before.context, context) {
-                            guard let after = result.slots[path], try equal(after.configuration, original),
-                                  try equal(after.context, context) else {
-                                throw AppleWallpaperError.verificationFailed
-                            }
-                        }
-                    }
-                }
-                try verifyRestored(try read())
+                let expected = OwnershipReceipt(originalValues: [:], appliedValues: restoredValues,
+                                                assetID: receipt.assetID, osBuild: receipt.osBuild)
+                guard try verified(try read(), receipt: expected) else { throw AppleWallpaperError.verificationFailed }
                 try reload()
-                try verifyRestored(try read())
+                guard try verified(try read(), receipt: expected) else { throw AppleWallpaperError.verificationFailed }
             }
             return RestoreResult(restoredCount: restored, skippedCount: skipped)
         }
@@ -221,34 +237,116 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
             var context = content
             var choice = choices[0]; choice.removeValue(forKey: "Configuration")
             context["Choices"] = [choice]
-            // Type is ownership-relevant; LastSet/LastUse and topology membership are not.
+            // Type stays in the receipt; only strict equivalent-branch projection
+            // may account for Apple normalizing linked and individual nodes.
             context["adapterNodeType"] = type
             let selector = path + "/" + name + "/Content/Choices/0/Configuration"
             slots[selector] = Slot(configuration: configuration, context: try encode(context), assetID: id)
         }
     }
 
-    private func changed(_ state: State, receipt: OwnershipReceipt) throws -> Bool {
-        for (path, owned) in receipt.appliedValues where !path.hasPrefix(Self.contextPrefix) {
-            // Removed nodes are topology changes; newly added nodes are adopted at the next apply.
-            guard let slot = state.slots[path] else {
-                // A branch change within an existing node is a user edit, whereas
-                // removal of the whole Space/display node is a topology change.
-                let node = path.components(separatedBy: "/Content/Choices/0/Configuration")[0]
-                    .components(separatedBy: "/").dropLast().joined(separator: "/")
-                if state.slots.keys.contains(where: { $0.hasPrefix(node + "/") }) { return true }
+    /// Map currently owned selectors to their receipt paths. A structural alias
+    /// is admitted only when *all* branches agree on the entire configuration
+    /// and content context, excluding solely the adapter's node-type annotation.
+    private func ownershipProjection(_ state: State, values: [String: Data]) throws -> [String: [String]] {
+        let previous = Dictionary(grouping: values.keys.filter { !$0.hasPrefix(Self.contextPrefix) }, by: nodePath)
+        let current = Dictionary(grouping: state.slots.keys, by: nodePath)
+        var result: [String: [String]] = [:]
+        for (node, sources) in previous {
+            guard let targets = current[node] else { continue }
+            let sourceBranches = Set(sources.map(branchName))
+            let targetBranches = Set(targets.map(branchName))
+            if sourceBranches == targetBranches {
+                for path in targets { result[path] = [path] }
                 continue
             }
-            guard let context = receipt.appliedValues[Self.contextPrefix + path],
-                  try equal(slot.configuration, owned), try equal(slot.context, context) else { return true }
+            let linked: Set<String> = ["Linked"]
+            let individual: Set<String> = ["Desktop", "Idle"]
+            guard (sourceBranches == linked && targetBranches == individual)
+                    || (sourceBranches == individual && targetBranches == linked) else { continue }
+            var equivalent = true
+            for path in targets {
+                guard let slot = state.slots[path], try owned(slot, matches: sources, values: values, allowingTypeProjection: true) else {
+                    equivalent = false; break
+                }
+            }
+            if equivalent { for path in targets { result[path] = sources.sorted() } }
+        }
+        return result
+    }
+
+    private func nodePath(_ selector: String) -> String {
+        String(selector.dropLast("/Content/Choices/0/Configuration".count))
+            .components(separatedBy: "/").dropLast().joined(separator: "/")
+    }
+
+    private func branchName(_ selector: String) -> String {
+        String(selector.dropLast("/Content/Choices/0/Configuration".count))
+            .components(separatedBy: "/").last ?? ""
+    }
+
+    private func projectedContext(_ data: Data, to target: Data) throws -> Data? {
+        var source = try dictionary(data)
+        let target = try dictionary(target)
+        guard let oldType = source["adapterNodeType"] as? String,
+              let newType = target["adapterNodeType"] as? String,
+              ["linked", "individual"].contains(oldType), ["linked", "individual"].contains(newType) else { return nil }
+        source["adapterNodeType"] = newType
+        return try encode(source)
+    }
+
+    private func owned(_ slot: Slot, matches sources: [String], values: [String: Data],
+                       allowingTypeProjection: Bool = true) throws -> Bool {
+        for source in sources {
+            guard let configuration = values[source], let context = values[Self.contextPrefix + source],
+                  try dictionary(context)["adapterNodeType"] as? String == (branchName(source) == "Linked" ? "linked" : "individual"),
+                  try equal(slot.configuration, configuration) else { return false }
+            if allowingTypeProjection {
+                guard let projected = try projectedContext(context, to: slot.context),
+                      try equal(slot.context, projected) else { return false }
+            } else if try !equal(slot.context, context) { return false }
+        }
+        return !sources.isEmpty
+    }
+
+    private func originalBaseline(_ sources: [String], values: [String: Data], target: Slot) throws -> Slot? {
+        var baseline: Slot?
+        for source in sources {
+            guard values[Self.unrestorablePrefix + source] == nil,
+                  let configuration = values[source], let context = values[Self.contextPrefix + source],
+                  let projected = try projectedContext(context, to: target.context) else { return nil }
+            if let baseline {
+                guard try equal(baseline.configuration, configuration), try equal(baseline.context, projected) else { return nil }
+            } else {
+                baseline = Slot(configuration: configuration, context: projected, assetID: "")
+            }
+        }
+        return baseline
+    }
+
+    private func changed(_ state: State, receipt: OwnershipReceipt) throws -> Bool {
+        let projection = try ownershipProjection(state, values: receipt.appliedValues)
+        let mapped = Set(projection.values.flatMap { $0 })
+        for path in receipt.appliedValues.keys where !path.hasPrefix(Self.contextPrefix) && !mapped.contains(path) {
+            // Whole-node removal remains topology; an incompatible branch change is interference.
+            if state.slots.keys.contains(where: { nodePath($0) == nodePath(path) }) { return true }
+        }
+        for (path, sources) in projection {
+            guard let slot = state.slots[path],
+                  try owned(slot, matches: sources, values: receipt.appliedValues,
+                            allowingTypeProjection: sources != [path]) else { return true }
         }
         return false
     }
 
     private func verified(_ state: State, receipt: OwnershipReceipt) throws -> Bool {
-        for (path, owned) in receipt.appliedValues where !path.hasPrefix(Self.contextPrefix) {
-            guard let slot = state.slots[path], let context = receipt.appliedValues[Self.contextPrefix + path],
-                  try equal(slot.configuration, owned), try equal(slot.context, context) else { return false }
+        let projection = try ownershipProjection(state, values: receipt.appliedValues)
+        let expected = Set(receipt.appliedValues.keys.filter { !$0.hasPrefix(Self.contextPrefix) })
+        guard Set(projection.values.flatMap { $0 }) == expected else { return false }
+        for (path, sources) in projection {
+            guard let slot = state.slots[path],
+                  try owned(slot, matches: sources, values: receipt.appliedValues,
+                            allowingTypeProjection: sources != [path]) else { return false }
         }
         return true
     }

@@ -147,11 +147,11 @@ final class AppleWallpaperTests {
         expectEqual(try adapter.restore(second).restoredCount, 7)
     }
 
-    @Test func testLinkedToIndividualIsExternalChange() throws {
+    @Test func testEquivalentLinkedToIndividualIsNotExternalChange() throws {
         let (adapter, file) = try setup(); let receipt = try adapter.apply(assetID: night, previous: nil)
         var edited = try decoded(Data(contentsOf: file)); edited["SystemDefault"] = try node(night, individual: true)
         try plist(edited).write(to: file)
-        expectTrue(try adapter.hasExternalChange(since: receipt))
+        expectFalse(try adapter.hasExternalChange(since: receipt))
     }
 
     @Test func testUnknownProviderStopsEntireTransactionWithoutWrite() throws {

@@ -251,3 +251,65 @@ rotation off and Start at Login enabled. Four normal-release samples five second
 apart with Settings never opened showed 0.0% CPU and 53,872–53,920 KiB RSS
 (52.6–52.7 MiB). The under-50-MiB target remains open in issue #2. The prior app
 and private recovery evidence remain available outside the repository.
+
+## Equivalent native layouts 0.3.3
+
+After the previous release, enabling Golden Gate applied its Night scene and then
+persisted an outside-change pause. Fresh receipt/store comparison found one
+Display's Linked entry replaced by individual Desktop and Idle entries, both
+with identical Golden Gate configuration. All remaining owned configuration and
+context values matched. macOS had changed the shape of the selection graph,
+rather than the selected image. The old ownership check treated every branch
+change as interference.
+
+The adapter now accepts only strictly equivalent Linked ↔ Desktop/Idle layouts
+within the same logical node. Every branch must match the complete configuration
+and content context; only the validated synthetic node-type marker is projected.
+Image, provider, file, shuffle, option and unknown-value differences remain
+significant. Verification, the next apply and conditional restoration share this
+projection. Original values follow equivalent branches without changing Apple's
+current node type or unrelated metadata. Incompatible collapsed originals remain
+retained as provenance and explicitly unrestorable; they are never replaced with
+the app's currently managed image. Atomic conflict guards remain unchanged.
+
+A new coordinator regression first reproduced the old failure after 0.858 seconds
+through the real directory DispatchSource and debounce, after a production-adapter
+apply had finished. Immediate readback and the earlier short live episode had
+missed this later notification. The new test boundary injects only the native
+store location and persistence/services; it keeps real native observation active.
+
+123 combined fixtures passed: 32 app/event/interface, 22 core and 69 native. The
+13 new adapter tests cover delayed/immediate rewrites, both layout directions,
+original lineage across two subsequent applies and a full layout round trip,
+ambiguous historical originals, genuine value changes and conditional restore.
+The actual watcher regression now retains ON after an equivalent rewrite, then
+persists OFF after a different asset appears in one branch.
+
+A private live watched episode passed in 41.537 seconds: ordinary Golden Gate
+Enable stayed ON through 30 seconds of real native directory observation; settled
+Tahoe and Golden Gate changes verified all 29 current selectors and matching
+Apple movie activation. Conditional restoration returned all 29 starting values
+without changing the real app configuration. An explicit forward apply then left
+the user's requested Golden Gate scene in place. Intermediate receipt snapshots
+were retained privately. Native control dispatch took approximately 1–29 ms.
+
+One earlier rapid Tahoe→Golden Gate attempt encountered a different real conflict:
+Apple's writer restored the prior Tahoe asset during verification. The app paused
+and conditional restore skipped values it could not prove it owned. This is not
+equivalent layout normalization and is not ignored or blindly retried. Reliable
+immediate consecutive changes remain a separate limitation in
+[issue #8](https://github.com/MuffinSmith/Wallpaper-Rotation/issues/8). The successful
+episode intentionally tested settled changes; it does not claim rapid-switch
+reliability.
+
+The 0.3.3 build 8 release passed plist lint and strict ad-hoc signature verification
+and replaced the normal installed app. A guarded stopped-app migration resumed
+only the automatic outside-change pause, preserving selection, mappings, location
+and the original receipt. The normal installed app, with actual AppStorage and
+production readiness gates, stayed enabled in samples every five seconds for
+35 seconds, with no pending records and unchanged original restore values.
+Its actual rendered Settings showed Golden Gate Night, Rotate Automatically on
+and Start at Login on. Snark's first scored normalization review passed at 8.6/10
+with no ordinary-Enable blockers (correctness 2.3, safety 2.3, maintainability 1.1,
+evidence 1.2, UI 0.8, updates 0.9). No external mouse automation, new OS restart,
+every-Space inspection, screen saver playback or morning transition is claimed.
