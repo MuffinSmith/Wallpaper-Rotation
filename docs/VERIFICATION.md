@@ -313,3 +313,67 @@ and Start at Login on. Snark's first scored normalization review passed at 8.6/1
 with no ordinary-Enable blockers (correctness 2.3, safety 2.3, maintainability 1.1,
 evidence 1.2, UI 0.8, updates 0.9). No external mouse automation, new OS restart,
 every-Space inspection, screen saver playback or morning transition is claimed.
+
+## Morning reconciliation 0.3.4
+
+The first real morning report found Tahoe Night still active. The saved state was
+paused for an outside change, despite the menu's affirmative "Rotation Enabled"
+action label. Every current asset still matched the app's receipt. One Display's
+Desktop/Idle entries had become Linked: Linked exactly retained Desktop's full
+configuration and context, while the former Idle had empty encoded options.
+Desktop carried the observed Crop and GenericRGB color option structure. Read-only
+old/new adapter probes on identical native bytes reproduced and corrected this
+classification without writing anything. The snapshot establishes the layout
+difference; it cannot identify which process performed the rewrite.
+
+A separate coordinator defect was reproduced: availability/menu refresh could
+replace an overdue transition timer without applying the current phase. Runtime
+refresh now checks ownership and catches up, session activation also reconciles,
+and the one transition timer runs in common run-loop modes. Initial discovery
+still waits for recovery and compatibility gates. An injectable clock permits
+Night-to-Day fixtures; production uses the real clock. The menu now offers Pause
+Rotation or Resume Rotation and updates that same item's state while tracked.
+
+The first accelerated live episode exposed the reverse native rewrite after a
+reload and paused before Day. The real configuration remained byte-identical,
+conditional recovery preserved uncertain values, and no pending operation remained.
+The adapter was then extended for that directly observed reverse shape: validate
+the entire pair, require Desktop to match Linked exactly, and allow only Idle's
+known encoded options to become empty. Neither an empty Desktop nor changed or
+unknown options is accepted. Original restoration contexts are not relaxed;
+ambiguous originals and inherited skip markers remain retained across later applies.
+
+The final combined suite passed 138 tests: 39 app, 22 core and 77 native. New
+fixtures cover overdue menu catch-up without replay, session/wake idempotence,
+paused and externally edited settings, startup gates, stable tracked-menu status,
+both bounded native rewrite directions, negative option/context edits, and baseline
+conservation across repeated layout changes and subsequent applications.
+
+The second private native episode passed in 19.816 seconds. It verified the actual
+overnight receipt/store comparison, enabled Night with an injected clock, advanced
+to the actual Day time, and invoked the public menu refresh with the production
+worker and directory watcher. All 30 current selectors became Tahoe Day and Apple's
+aerial process opened the matching movie. Rotation stayed enabled at 5, 10 and
+15 seconds; another refresh made no native store write. Conditional restoration
+returned all starting values and the real app configuration stayed byte-identical.
+This was accelerated coordinator testing on the native service, not a real
+overnight wait or an externally automated mouse interaction.
+
+The signed 0.3.4 build 9 replaced the installed app at its stable Applications
+path after a graceful quit. A guarded migration resumed only the unchanged
+automatic outside-change pause, retaining Tahoe, mappings, saved location and
+original receipt. An initial observer assertion incorrectly compared serialized
+dictionary-pair order; normalized mappings were identical and the app stayed
+enabled. That failed harness log was retained and the corrected observer rerun.
+The actual installed Settings showed Tahoe Day, rotation on and Start at Login on.
+The corrected normal-app observer passed at 5, 10, 15, 20, 25 and 30 seconds:
+all 30 native selectors matched Day, rotation remained enabled, no operation was
+pending, semantic mappings matched and all original restoration entries were
+retained unchanged. Apple's aerial process held the Tahoe Day movie. Snark's
+first scored review passed at 9.1/10 with no blockers (correctness 2.3, safety 2.3,
+lightweight design 1.4, evidence 1.3, UI 0.9, updates 0.9), including inspection
+of the actual installed Settings screenshot and final observation log.
+No new OS restart, actual overnight transition, every-Space inspection, screen
+saver playback, location authorization or resource benchmark is claimed.
+Rapid consecutive writes remain tracked in issue #8. Ambiguous original contexts
+are conservatively skipped during Restore Previous Setup and their evidence kept.

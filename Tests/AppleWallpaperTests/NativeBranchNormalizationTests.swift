@@ -4,6 +4,206 @@ import Testing
 
 @Suite(.serialized)
 struct NativeBranchNormalizationTests {
+    @Test func observedDesktopOptionsCollapseKeepsOwnershipAndAmbiguousOriginals() throws {
+        let fixture = try BranchFixture(individual: true)
+        try fixture.setObservedBranchOptions()
+        let adapter = fixture.adapter()
+        let first = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: false)
+        #expect(try !adapter.hasExternalChange(since: first))
+        let second = try adapter.apply(assetID: fixture.sunset, previous: first)
+        #expect(second.originalValues[fixture.selector("Desktop")] == first.originalValues[fixture.selector("Desktop")])
+        #expect(second.originalValues["context:" + fixture.selector("Desktop")] == first.originalValues["context:" + fixture.selector("Desktop")])
+        #expect(second.originalValues["context:" + fixture.selector("Idle")] == first.originalValues["context:" + fixture.selector("Idle")])
+        #expect(second.originalValues[fixture.selector("Linked")] == nil)
+        #expect(second.originalValues["context:adapterUnrestorable:" + fixture.selector("Linked")] != nil)
+        let third = try adapter.apply(assetID: fixture.night, previous: second)
+        let before = try fixture.displayNode()
+        let restored = try adapter.restore(third)
+        #expect(restored.restoredCount == 1)
+        #expect(restored.skippedCount == 1)
+        #expect(NSDictionary(dictionary: try fixture.displayNode()).isEqual(to: before))
+        #expect(third.originalValues[fixture.selector("Desktop")] == first.originalValues[fixture.selector("Desktop")])
+    }
+
+    @Test func directRestoreOfObservedDesktopOptionsCollapsePreservesAmbiguousNode() throws {
+        let fixture = try BranchFixture(individual: true)
+        try fixture.setObservedBranchOptions()
+        let adapter = fixture.adapter()
+        let receipt = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: false)
+        let before = try fixture.displayNode()
+        let restored = try adapter.restore(receipt)
+        #expect(restored.restoredCount == 1)
+        #expect(restored.skippedCount == 1)
+        #expect(NSDictionary(dictionary: try fixture.displayNode()).isEqual(to: before))
+    }
+
+    @Test func observedCollapseWithManagedNightAlreadyOriginalNeverRecapturesLinkedBaseline() throws {
+        let fixture = try BranchFixture(individual: true)
+        try fixture.setObservedBranchOptions()
+        for branch in ["Desktop", "Idle"] {
+            try fixture.editContent(branch) { content in
+                var choices = content["Choices"] as! [[String: Any]]
+                choices[0]["Configuration"] = try fixture.encode(["assetID": fixture.night])
+                content["Choices"] = choices
+            }
+        }
+        let adapter = fixture.adapter()
+        let first = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: false)
+        let second = try adapter.apply(assetID: fixture.sunset, previous: first)
+        #expect(second.originalValues[fixture.selector("Linked")] == nil)
+        #expect(second.originalValues[fixture.selector("Desktop")] == first.originalValues[fixture.selector("Desktop")])
+        #expect(second.originalValues["context:" + fixture.selector("Idle")] == first.originalValues["context:" + fixture.selector("Idle")])
+        let restored = try adapter.restore(second)
+        #expect(restored.skippedCount == 1)
+        #expect(try fixture.currentAsset("Linked") == fixture.sunset)
+    }
+
+    @Test func observedSplitWithClearedIdleOptionsRetainsOriginalThroughApplyRestoreAndRecollapse() throws {
+        let fixture = try BranchFixture()
+        try fixture.editContent("Linked") { $0["EncodedOptionValues"] = try fixture.observedDesktopOptions() }
+        let adapter = fixture.adapter()
+        let receipt = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: true)
+        try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()]) }
+        #expect(try !adapter.hasExternalChange(since: receipt))
+        let second = try adapter.apply(assetID: fixture.sunset, previous: receipt)
+        for branch in ["Linked", "Desktop", "Idle"] {
+            #expect(second.originalValues[fixture.selector(branch)] == receipt.originalValues[fixture.selector("Linked")])
+        }
+        try fixture.normalize(individual: false)
+        #expect(try !adapter.hasExternalChange(since: second))
+        let third = try adapter.apply(assetID: fixture.night, previous: second)
+        try fixture.normalize(individual: true)
+        try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()]) }
+        let restored = try adapter.restore(third)
+        #expect(restored.restoredCount == 3)
+        #expect(restored.skippedCount == 0)
+        #expect(try adapter.inspect().selections.values.allSatisfy { $0 == fixture.day })
+        let node = try fixture.displayNode()
+        let idle = node["Idle"] as! [String: Any]
+        let idleContent = idle["Content"] as! [String: Any]
+        #expect(try fixture.decode(idleContent["EncodedOptionValues"] as! Data).keys.sorted() == ["values"])
+        #expect((try fixture.decode(idleContent["EncodedOptionValues"] as! Data)["values"] as? [String: Any])?.isEmpty == true)
+    }
+
+    @Test func observedSplitRejectsChangedDesktopUnknownOptionsNonemptyIdleAndEmptyDesktop() throws {
+        for mutation in 0..<7 {
+            let fixture = try BranchFixture()
+            try fixture.editContent("Linked") { content in
+                var options = try fixture.decode(fixture.observedDesktopOptions(placement: mutation == 6 ? "Fit" : "Crop"))
+                if mutation == 1 {
+                    var values = options["values"] as! [String: Any]
+                    values["unknown"] = "retain"; options["values"] = values
+                }
+                content["EncodedOptionValues"] = try fixture.encode(options)
+            }
+            let adapter = fixture.adapter()
+            let receipt = try adapter.apply(assetID: fixture.night, previous: nil)
+            try fixture.normalize(individual: true)
+            try fixture.editContent("Idle") { content in
+                content["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()])
+                if mutation == 2 { content["EncodedOptionValues"] = try fixture.observedDesktopOptions(placement: "Fit") }
+                if mutation == 5 { content["unknown"] = "retain" }
+            }
+            if mutation == 0 {
+                try fixture.editContent("Desktop") { $0["EncodedOptionValues"] = try fixture.observedDesktopOptions(red: 0.7) }
+            } else if mutation == 3 || mutation == 4 {
+                try fixture.editContent("Desktop") { $0["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()]) }
+                if mutation == 4 { try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.observedDesktopOptions() } }
+            }
+            #expect(try adapter.hasExternalChange(since: receipt))
+            let before = try Data(contentsOf: fixture.file)
+            #expect(throws: AppleWallpaperError.self) { _ = try adapter.apply(assetID: fixture.day, previous: receipt) }
+            #expect(try Data(contentsOf: fixture.file) == before)
+            _ = try adapter.restore(receipt)
+            #expect(try fixture.currentAsset("Desktop") == fixture.night)
+            #expect(try fixture.currentAsset("Idle") == fixture.night)
+        }
+    }
+
+    @Test func observedSplitPreservesAlreadyNightOriginalForEveryAlias() throws {
+        let fixture = try BranchFixture()
+        try fixture.editContent("Linked") { content in
+            content["EncodedOptionValues"] = try fixture.observedDesktopOptions()
+            var choices = content["Choices"] as! [[String: Any]]
+            choices[0]["Configuration"] = try fixture.encode(["assetID": fixture.night])
+            content["Choices"] = choices
+        }
+        let adapter = fixture.adapter()
+        let first = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: true)
+        try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()]) }
+        let second = try adapter.apply(assetID: fixture.sunset, previous: first)
+        for branch in ["Linked", "Desktop", "Idle"] {
+            #expect(second.originalValues[fixture.selector(branch)] == first.originalValues[fixture.selector("Linked")])
+        }
+        let restored = try adapter.restore(second)
+        #expect(restored.restoredCount == 3)
+        #expect(restored.skippedCount == 0)
+        #expect(try fixture.currentAsset("Desktop") == fixture.night)
+        #expect(try fixture.currentAsset("Idle") == fixture.night)
+    }
+
+    @Test func ambiguousOriginalsRemainRetainedThroughKnownCollapseAndSplit() throws {
+        let fixture = try BranchFixture(individual: true)
+        try fixture.setObservedBranchOptions()
+        let adapter = fixture.adapter()
+        let first = try adapter.apply(assetID: fixture.night, previous: nil)
+        try fixture.normalize(individual: false)
+        let second = try adapter.apply(assetID: fixture.sunset, previous: first)
+        try fixture.normalize(individual: true)
+        try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.encode(["values": [String: Any]()]) }
+        let third = try adapter.apply(assetID: fixture.night, previous: second)
+        for (path, baseline) in first.originalValues { #expect(third.originalValues[path] == baseline) }
+        #expect(third.originalValues[fixture.selector("Linked")] == nil)
+        #expect(third.originalValues["context:adapterUnrestorable:" + fixture.selector("Desktop")] != nil)
+        #expect(third.originalValues["context:adapterUnrestorable:" + fixture.selector("Idle")] != nil)
+        let before = try fixture.displayNode()
+        let restored = try adapter.restore(third)
+        #expect(restored.restoredCount == 1)
+        #expect(restored.skippedCount == 2)
+        #expect(NSDictionary(dictionary: try fixture.displayNode()).isEqual(to: before))
+    }
+
+    @Test func observedCollapseRejectsChangedOptionsUnknownValuesAndMeaningfulIdleOptions() throws {
+        for mutation in 0..<8 {
+            let fixture = try BranchFixture(individual: true)
+            try fixture.setObservedBranchOptions()
+            if mutation == 2 {
+                try fixture.editContent("Idle") { $0["EncodedOptionValues"] = try fixture.encode(["values": ["placement": ["picker": ["_0": ["id": "Fit"]]]]]) }
+            } else if mutation >= 3 {
+                try fixture.editContent("Desktop") { content in
+                    var options = try fixture.decode(content["EncodedOptionValues"] as! Data)
+                    var values = options["values"] as! [String: Any]
+                    if mutation == 3 { values["unknown"] = "retain" }
+                    if mutation == 4 { options["unknown"] = "retain" }
+                    if mutation == 5 { values["placement"] = ["picker": ["_0": ["id": "Fit"]]] }
+                    if mutation == 6 { values["color"] = ["color": ["_0": ["color": ["components": [1.2, 0.0, 0.0, 1.0], "colorSpace": try fixture.encodeString("kCGColorSpaceGenericRGB")]]]] }
+                    if mutation == 7 { values["color"] = ["color": ["_0": ["color": ["components": [0.0, 0.0, 0.0, 1.0], "colorSpace": try fixture.encodeString("unknown-space")]]]] }
+                    options["values"] = values
+                    content["EncodedOptionValues"] = try fixture.encode(options)
+                }
+            }
+            let adapter = fixture.adapter()
+            let receipt = try adapter.apply(assetID: fixture.night, previous: nil)
+            try fixture.normalize(individual: false)
+            if mutation <= 1 {
+                try fixture.editContent("Linked") { content in
+                    content["EncodedOptionValues"] = try fixture.observedDesktopOptions(placement: mutation == 0 ? "Fit" : "Crop", red: mutation == 1 ? 0.7 : 0.2549019607843137)
+                }
+            }
+            #expect(try adapter.hasExternalChange(since: receipt))
+            let before = try Data(contentsOf: fixture.file)
+            #expect(throws: AppleWallpaperError.self) { _ = try adapter.apply(assetID: fixture.day, previous: receipt) }
+            #expect(try Data(contentsOf: fixture.file) == before)
+            _ = try adapter.restore(receipt)
+            #expect(try fixture.currentAsset("Linked") == fixture.night)
+        }
+    }
+
     @Test func immediateReloadNormalizationIsVerifiedAndRestoresBothBranches() throws {
         let fixture = try BranchFixture()
         var reloads = 0
@@ -274,6 +474,16 @@ private final class BranchFixture {
                                reload: reload, assetAvailable: { _ in true })
     }
     func encode(_ value: Any) throws -> Data { try PropertyListSerialization.data(fromPropertyList: value, format: .binary, options: 0) }
+    func encodeString(_ value: String) throws -> Data { try encode(value) }
+    func observedDesktopOptions(placement: String = "Crop", red: Double = 0.2549019607843137) throws -> Data {
+        try encode(["values": ["placement": ["picker": ["_0": ["id": placement]]],
+                               "color": ["color": ["_0": ["color": ["components": [red, 0.4117647058823529, 0.6666666666666666, 1.0],
+                                                                        "colorSpace": try encodeString("kCGColorSpaceGenericRGB")]]]]]])
+    }
+    func setObservedBranchOptions() throws {
+        try editContent("Desktop") { $0["EncodedOptionValues"] = try observedDesktopOptions() }
+        try editContent("Idle") { $0["EncodedOptionValues"] = try encode(["values": [String: Any]()]) }
+    }
     func decode(_ value: Data) throws -> [String: Any] { try #require(PropertyListSerialization.propertyList(from: value, options: [], format: nil) as? [String: Any]) }
     func selector(_ branch: String) -> String { "/Displays/fixture/\(branch)/Content/Choices/0/Configuration" }
     func displayNode() throws -> [String: Any] {
