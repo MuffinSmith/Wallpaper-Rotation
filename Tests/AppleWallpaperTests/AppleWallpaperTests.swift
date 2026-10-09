@@ -307,6 +307,35 @@ final class AppleWallpaperTests {
         expectTrue(sets.flatMap(\.assets).allSatisfy { !$0.isDownloaded })
     }
 
+    @Test func testAppearanceAndColorCollectionsAreExcludedWithoutHidingUnmappedLocations() throws {
+        let dir = try temporary(); let manifest = dir.appendingPathComponent("entries.json")
+        let groups: [(String, String, String, String, [String])] = [
+            ("dynamic-aerials", "AerialCategoryDynamic", "graphical", "AerialSubcategoryDescriptionGoldenGateGraphical", ["GG_LM_H", "GG_LM_V", "GG_DM_H", "GG_DM_V"]),
+            ("mac", "AerialCategoryMac", "colors", "AerialSubcategoryDescriptionMac", ["MAC_WP_PPL", "MAC_WP_BLU", "MAC_WP_PNK", "MAC_WP_YLW"]),
+            ("landscapes", "AerialCategoryLandscapes", "gg", "AerialSubcategoryGoldenGate", ["GG_A_DAY", "GG_A_SUNSET", "GG_A_EVENING", "GG_A_NIGHT"]),
+            ("landscapes", "AerialCategoryLandscapes", "redwoods", "AerialSubcategoryRedwoods", ["RW_001", "RW_002", "RW_003", "RW_004"])
+        ]
+        var entries: [[String: Any]] = []
+        var categories: [[String: Any]] = []
+        for (categoryID, categoryName, groupID, groupName, shots) in groups {
+            categories.append(["id": categoryID, "localizedNameKey": categoryName,
+                               "subcategories": [["id": groupID, "localizedNameKey": groupName]]])
+            for shot in shots {
+                entries.append(["id": UUID().uuidString, "shotID": shot,
+                                "accessibilityLabel": shot, "localizedNameKey": shot + "_NAME",
+                                "subcategories": [groupID]])
+            }
+        }
+        try JSONSerialization.data(withJSONObject: ["version": 1, "assets": entries, "categories": categories]).write(to: manifest)
+        let sets = try AppleSetCatalog(manifestURL: manifest, fallbackManifestURL: manifest,
+                                       videosDirectory: dir, previewDirectory: dir).discover()
+        expectEqual(sets.map(\.name), ["Golden Gate", "Redwoods"])
+        expectEqual(sets[0].suggestedMapping.count, 4)
+        expectFalse(sets[0].requiresReview)
+        expectTrue(sets[1].suggestedMapping.isEmpty)
+        expectTrue(sets[1].requiresReview)
+    }
+
     @Test func testInvalidPreferredCatalogDoesNotSilentlyFallback() throws {
         let dir = try temporary(); let preferred = dir.appendingPathComponent("bad.json")
         try Data("{}".utf8).write(to: preferred)
