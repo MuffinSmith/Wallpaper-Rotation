@@ -50,8 +50,23 @@ Exclude only the synthetic node-type marker; asset, provider, files, options and
 unknown values remain significant. Apply and conditional restore must use the
 same projection so original values follow equivalent branches without rewriting
 Apple's current node type. Ambiguous merged originals must never be guessed.
+One observed layout exception retains the complete owned Desktop
+context while combining or separating an Idle context with exactly empty encoded option values.
+Accept only the validated Crop and GenericRGB color option shape; preserve exact
+Desktop equality and all other context fields. This is a bounded representation
+rule, not proof of the actor that changed the store. Validate the whole pair before
+projecting either selector; an empty or changed Desktop is never accepted. Unknown options or meaningful
+Idle options remain interference. Original restore contexts are not normalized
+by this exception; ambiguous baselines stay retained and skipped.
 Exercise delayed rewrites through the actual directory watcher and debounce;
 an immediate readback or a coordinator without observation can miss this case.
+
+Refreshes must reconcile an overdue phase before replacing its next-transition
+timer. Check ownership before catch-up, respect paused/pending/startup gates,
+and listen for session activation as well as wake. Use one timer in common run-loop
+modes so an open menu cannot starve it. Keep the injectable clock at the coordinator
+boundary; tests should advance Night to Day without waiting overnight. Label such
+tests separately from real login, reboot, or overnight observations.
 
 ## Pull requests
 

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import CryptoKit
 import Darwin
 
@@ -100,7 +101,8 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
             for (path, sources) in projection {
                 accountedNodes.insert(nodePath(path))
                 guard let slot = state.slots[path],
-                      try owned(slot, matches: sources, values: receipt.appliedValues, allowingTypeProjection: sources != [path]),
+                      try owned(slot, matches: sources, values: receipt.appliedValues, allowingTypeProjection: sources != [path],
+                                allowingEmptyIdle: branchName(path) == "Idle"),
                       let baseline = try originalBaseline(sources, values: receipt.originalValues, target: slot) else {
                     skipped += 1; continue
                 }
@@ -246,8 +248,8 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
     }
 
     /// Map currently owned selectors to their receipt paths. A structural alias
-    /// is admitted only when *all* branches agree on the entire configuration
-    /// and content context, excluding solely the adapter's node-type annotation.
+    /// requires complete configuration/context agreement, or the narrowly
+    /// validated Desktop-options layouts below. Unknown values stay strict.
     private func ownershipProjection(_ state: State, values: [String: Data]) throws -> [String: [String]] {
         let previous = Dictionary(grouping: values.keys.filter { !$0.hasPrefix(Self.contextPrefix) }, by: nodePath)
         let current = Dictionary(grouping: state.slots.keys, by: nodePath)
@@ -266,7 +268,11 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
                     || (sourceBranches == individual && targetBranches == linked) else { continue }
             var equivalent = true
             for path in targets {
-                guard let slot = state.slots[path], try owned(slot, matches: sources, values: values, allowingTypeProjection: true) else {
+                // The full pair is checked before either target is projected.
+                // Only Idle may clear the bounded options; Desktop must remain exact.
+                guard let slot = state.slots[path],
+                      try owned(slot, matches: sources, values: values, allowingTypeProjection: true,
+                                allowingEmptyIdle: branchName(path) == "Idle") else {
                     equivalent = false; break
                 }
             }
@@ -296,7 +302,10 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
     }
 
     private func owned(_ slot: Slot, matches sources: [String], values: [String: Data],
-                       allowingTypeProjection: Bool = true) throws -> Bool {
+                       allowingTypeProjection: Bool = true, allowingEmptyIdle: Bool = false) throws -> Bool {
+        if allowingTypeProjection, try ownedDesktopOptionsCollapse(slot, sources: sources, values: values) { return true }
+        if allowingTypeProjection && allowingEmptyIdle,
+           try ownedEmptyIdleSplit(slot, sources: sources, values: values) { return true }
         for source in sources {
             guard let configuration = values[source], let context = values[Self.contextPrefix + source],
                   try dictionary(context)["adapterNodeType"] as? String == (branchName(source) == "Linked" ? "linked" : "individual"),
@@ -307,6 +316,64 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
             } else if try !equal(slot.context, context) { return false }
         }
         return !sources.isEmpty
+    }
+
+    /// A narrowly observed individual -> linked representation: Linked retains
+    /// Desktop verbatim while Idle had no encoded options. This does not identify
+    /// the writer or declare arbitrary options equivalent. Historical originals
+    /// still use the stricter originalBaseline check and may remain unrestorable.
+    private func ownedDesktopOptionsCollapse(_ slot: Slot, sources: [String], values: [String: Data]) throws -> Bool {
+        guard sources.count == 2, Set(sources.map(branchName)) == Set(["Desktop", "Idle"]),
+              try dictionary(slot.context)["adapterNodeType"] as? String == "linked",
+              let desktop = sources.first(where: { branchName($0) == "Desktop" }),
+              let idle = sources.first(where: { branchName($0) == "Idle" }),
+              try owned(slot, matches: [desktop], values: values, allowingTypeProjection: true),
+              let idleConfiguration = values[idle], try equal(slot.configuration, idleConfiguration),
+              let idleContext = values[Self.contextPrefix + idle],
+              try dictionary(idleContext)["adapterNodeType"] as? String == "individual",
+              let projected = try projectedContext(idleContext, to: slot.context) else { return false }
+        return try emptyIdleOptionsMatch(desktopContext: slot.context, idleContext: projected)
+    }
+
+    /// Only current Idle targets use this rule. Projection publishes the node
+    /// only after its complete Desktop/Idle pair passes; Desktop stays exact.
+    private func ownedEmptyIdleSplit(_ slot: Slot, sources: [String], values: [String: Data]) throws -> Bool {
+        guard sources.count == 1, let source = sources.first, branchName(source) == "Linked",
+              try dictionary(slot.context)["adapterNodeType"] as? String == "individual",
+              let configuration = values[source], try equal(slot.configuration, configuration),
+              let context = values[Self.contextPrefix + source],
+              try dictionary(context)["adapterNodeType"] as? String == "linked",
+              let projected = try projectedContext(context, to: slot.context) else { return false }
+        return try emptyIdleOptionsMatch(desktopContext: projected, idleContext: slot.context)
+    }
+
+    private func emptyIdleOptionsMatch(desktopContext: Data, idleContext: Data) throws -> Bool {
+        var desktopContext = try dictionary(desktopContext)
+        var emptyIdleContext = try dictionary(idleContext)
+        guard let desktopOptions = desktopContext.removeValue(forKey: "EncodedOptionValues") as? Data,
+              let idleOptions = emptyIdleContext.removeValue(forKey: "EncodedOptionValues") as? Data,
+              try equal(encode(desktopContext), encode(emptyIdleContext)),
+              try equal(idleOptions, encode(["values": [String: Any]()])),
+              try observedDesktopOptions(desktopOptions) else { return false }
+        return true
+    }
+
+    private func observedDesktopOptions(_ data: Data) throws -> Bool {
+        let options = try dictionary(data)
+        guard Set(options.keys) == Set(["values"]), let values = options["values"] as? [String: Any],
+              Set(values.keys) == Set(["color", "placement"]),
+              let placement = values["placement"] as? [String: Any],
+              try equal(encode(placement), encode(["picker": ["_0": ["id": "Crop"]]])),
+              let color = values["color"] as? [String: Any], Set(color.keys) == Set(["color"]),
+              let variant = color["color"] as? [String: Any], Set(variant.keys) == Set(["_0"]),
+              let payload = variant["_0"] as? [String: Any], Set(payload.keys) == Set(["color"]),
+              let components = payload["color"] as? [String: Any], Set(components.keys) == Set(["components", "colorSpace"]),
+              let rgba = components["components"] as? [NSNumber], rgba.count == 4,
+              rgba.allSatisfy({ CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue.isFinite && (0...1).contains($0.doubleValue) }),
+              let space = components["colorSpace"] as? Data,
+              let name = try? PropertyListSerialization.propertyList(from: space, options: [], format: nil) as? String,
+              name == "kCGColorSpaceGenericRGB" else { return false }
+        return true
     }
 
     private func originalBaseline(_ sources: [String], values: [String: Data], target: Slot) throws -> Slot? {
@@ -334,7 +401,7 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
         for (path, sources) in projection {
             guard let slot = state.slots[path],
                   try owned(slot, matches: sources, values: receipt.appliedValues,
-                            allowingTypeProjection: sources != [path]) else { return true }
+                            allowingTypeProjection: sources != [path], allowingEmptyIdle: branchName(path) == "Idle") else { return true }
         }
         return false
     }
@@ -346,7 +413,7 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
         for (path, sources) in projection {
             guard let slot = state.slots[path],
                   try owned(slot, matches: sources, values: receipt.appliedValues,
-                            allowingTypeProjection: sources != [path]) else { return false }
+                            allowingTypeProjection: sources != [path], allowingEmptyIdle: branchName(path) == "Idle") else { return false }
         }
         return true
     }

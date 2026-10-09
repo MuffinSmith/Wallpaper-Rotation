@@ -56,6 +56,10 @@ building. It does not create certificates, alter Keychain, or notarize a release
 
 The menu shows the actual scene and next transition. Pausing leaves the current
 wallpaper in place. A manual wallpaper change pauses rotation across relaunches.
+The menu offers **Pause Rotation** while running and **Resume Rotation** while
+paused, with the pause reason shown above it. Enabled rotation catches up to the
+current solar phase after wake, session activation, or a menu/catalog refresh;
+missed phases are not replayed.
 All monitors and Spaces share the selected scheduled scene while rotation runs.
 Changing a ready set while rotation is enabled updates the wallpaper immediately.
 During an update, Settings remains usable and shows its progress. Further set or
@@ -77,7 +81,8 @@ it is **not guaranteed across future macOS updates**.
 
 Normal restore conditionally reverses only values the app still owns. It leaves
 later manual changes alone. Raw backups are retained for inspection, not blindly
-written over newer settings. See the [recovery guide](docs/RECOVERY.md) for an
+written over newer settings. If macOS combines entries whose original contexts
+differ, uncertain restore values are retained and reported as skipped. See the [recovery guide](docs/RECOVERY.md) for an
 interrupted or uncertain update. Atomic replacement prevents torn writes; Apple does
 not participate in the app's lock, so concurrent settings changes cannot be made
 fully transactional.

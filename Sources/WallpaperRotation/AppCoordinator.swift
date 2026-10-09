@@ -25,6 +25,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastAutomaticLocationRequest = Date.distantPast
     private let adapter: NativeWallpaperAdapter
     private let solar = SolarSchedule()
+    private let now: () -> Date
+    private var runtimeReconciliationReady = false
+    private var lifecycleObservationStarted = false
     private lazy var location: LocationService = {
         let service = LocationService()
         service.onFix = { [weak self] fix in self?.receive(fix) }
@@ -57,6 +60,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let showSettings: () -> Void
         var replyToTermination: ((Bool) -> Void)? = nil
         var makeDownloader: (() -> any WallpaperDownloading)? = nil
+        var runtimeReconciliationReady = true
     }
     private let enableEnvironment: EnableEnvironment?
 
@@ -65,12 +69,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?,
          nativeWorker: NativeApplyWorker = NativeApplyWorker(),
-         nativeAdapter: NativeWallpaperAdapter = NativeWallpaperAdapter()) {
+         nativeAdapter: NativeWallpaperAdapter = NativeWallpaperAdapter(),
+         now: @escaping () -> Date = Date.init) {
         self.configuration = configuration
         self.sets = sets
         self.enableEnvironment = enableEnvironment
         self.nativeWorker = nativeWorker
         self.adapter = nativeAdapter
+        self.now = now
+        // Injected environments have already established their fixture gates.
+        self.runtimeReconciliationReady = enableEnvironment?.runtimeReconciliationReady == true
         super.init()
     }
     var downloadRunning: Bool { downloadTask != nil }
@@ -172,13 +180,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
                 name: NSApplication.didBecomeActiveNotification, object: nil)
             recoverPendingVisualVerification()
-            let workspace = NSWorkspace.shared.notificationCenter
-            workspace.addObserver(self, selector: #selector(lifecycleChanged), name: NSWorkspace.didWakeNotification, object: nil)
-            workspace.addObserver(self, selector: #selector(lifecycleChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
-            NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
-            NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: .NSSystemTimeZoneDidChange, object: nil)
-            NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: .NSCalendarDayChanged, object: nil)
-            NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: .NSSystemClockDidChange, object: nil)
+            startLifecycleObservation()
+            runtimeReconciliationReady = true
             if configuration.rotationEnabled {
                 if !canEnable || !nativeReady { pause("Compatibility or setup requires review") }
                 else if checkOwnership() { recalculate(apply: true) }
@@ -276,7 +279,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refreshCatalog() {
         // The worker owns native readback while a transaction is in progress.
         guard !nativeOperationRunning else { catalogRefreshPending = true; render(); return }
-        if enableEnvironment != nil { recalculate(apply: false); return }
+        if enableEnvironment != nil { reconcileCurrentScene(); return }
         do {
             sets = try AppleSetCatalog().discover()
             inspection = try adapter.inspect()
@@ -285,7 +288,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             message = error.localizedDescription; inspection = nil
             if configuration.rotationEnabled { pause("Native wallpaper storage unavailable") }
         }
-        recalculate(apply: false)
+        reconcileCurrentScene()
+    }
+    private func reconcileCurrentScene() {
+        // Initial discovery precedes journal recovery and native observation.
+        // Only an established runtime may catch up or claim current ownership.
+        let shouldApply = runtimeReconciliationReady && configuration.rotationEnabled && checkOwnership()
+        recalculate(apply: shouldApply)
     }
     func refreshAvailability() { refreshCatalog() }
     @objc private func availabilityMayHaveChanged() { refreshAvailability() }
@@ -363,15 +372,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func useCurrentLocation() { guard !readOnly else { return }; location.requestLocation(userInitiated: true) }
     func saveManualLocation(_ coordinate: Coordinate) {
-        receive(LocationFix(coordinate: coordinate, capturedAt: Date(), source: "Manual coordinates"))
+        receive(LocationFix(coordinate: coordinate, capturedAt: now(), source: "Manual coordinates"))
     }
     private func requestAutomaticLocationIfNeeded(force: Bool = false) {
-        let age = Date().timeIntervalSince(lastAutomaticLocationRequest)
+        let age = now().timeIntervalSince(lastAutomaticLocationRequest)
         guard !readOnly, configuration.lastFix?.source != "Manual coordinates",
               configuration.lastFix != nil,
               age >= 900 || age < 0,
-              force || configuration.lastFix.map({ Date().timeIntervalSince($0.capturedAt) > 21_600 }) == true else { return }
-        lastAutomaticLocationRequest = Date()
+              force || configuration.lastFix.map({ now().timeIntervalSince($0.capturedAt) > 21_600 }) == true else { return }
+        lastAutomaticLocationRequest = now()
         location.requestLocation(userInitiated: false)
     }
     @objc func toggleRotation() { requestRotationToggle(using: requestedRotationSelection) }
@@ -411,13 +420,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func recalculate(apply: Bool) {
         timer?.invalidate(); timer = nil
         if let fix = configuration.lastFix {
-            do { schedule = try solar.evaluate(now: Date(), at: fix.coordinate) }
+            do { schedule = try solar.evaluate(now: now(), at: fix.coordinate) }
             catch { schedule = nil; message = error.localizedDescription; if configuration.rotationEnabled { pause("Solar schedule unavailable") } }
         } else { schedule = nil }
         if apply && configuration.rotationEnabled { applyCurrentScene() }
-        if configuration.rotationEnabled, !terminationPending, let next = schedule?.nextTransition {
-            timer = Timer.scheduledTimer(timeInterval: max(1, next.date.timeIntervalSinceNow), target: self,
+        if runtimeReconciliationReady, configuration.rotationEnabled, !terminationPending, let next = schedule?.nextTransition {
+            // Convert the schedule clock to a real run-loop deadline. Production
+            // uses Date for both; injected past clocks must not create an immediate loop.
+            let fireDate = Date().addingTimeInterval(max(1, next.date.timeIntervalSince(now())))
+            let transitionTimer = Timer(fireAt: fireDate, interval: 0, target: self,
                                         selector: #selector(transitionReached), userInfo: nil, repeats: false)
+            timer = transitionTimer
+            RunLoop.main.add(transitionTimer, forMode: .common)
         }
         render()
     }
@@ -536,8 +550,21 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch { inspection = nil; message = error.localizedDescription; pause("Native wallpaper state could not be checked"); return false }
         return true
     }
+    func startLifecycleObservation() {
+        guard !readOnly, !lifecycleObservationStarted else { return }
+        lifecycleObservationStarted = true
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.addObserver(self, selector: #selector(lifecycleChanged), name: name, object: nil)
+        }
+        for name in [NSApplication.didChangeScreenParametersNotification, .NSSystemTimeZoneDidChange,
+                     .NSCalendarDayChanged, .NSSystemClockDidChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: name, object: nil)
+        }
+    }
     @objc private func lifecycleChanged() {
-        guard !readOnly else { return }
+        guard !readOnly, runtimeReconciliationReady else { return }
         // Lifecycle reconciliation lets the adapter distinguish new contexts from changed owned ones.
         if configuration.rotationEnabled && checkOwnership() { recalculate(apply: true) }
         else { recalculate(apply: false) }
@@ -772,11 +799,17 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private func renderMenu() {
         guard let menu = statusItem?.menu else { return }
+        renderMenuContents(menu)
+    }
+    func renderMenuContents(_ menu: NSMenu) {
         if menuTracking {
             // Keep the tracked menu stable while byte progress and file events arrive.
             // Rebuilding it can move the item underneath the user's pointer.
             menu.items.first?.title = currentTitle
             if menu.items.count > 1 { menu.items[1].title = menuScheduleTitle }
+            if let item = menu.items.first(where: { $0.identifier?.rawValue == "rotation-toggle" }) {
+                updateRotationMenuItem(item)
+            }
             if let item = menu.items.first(where: { $0.identifier?.rawValue == "download-status" }) {
                 let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
                 let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
@@ -813,12 +846,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             download.target = self; download.representedObject = set.id; download.isEnabled = !readOnly
             menu.addItem(download)
         }
-        let rotation = NSMenuItem(title: "Rotation Enabled", action: #selector(toggleRotation), keyEquivalent: "")
-        rotation.target = self; rotation.state = configuration.rotationEnabled ? .on : .off; rotation.isEnabled = configuration.rotationEnabled || canEnableRequestedRotation
+        let rotation = NSMenuItem(title: "", action: #selector(toggleRotation), keyEquivalent: "")
+        rotation.identifier = NSUserInterfaceItemIdentifier("rotation-toggle")
+        rotation.target = self; updateRotationMenuItem(rotation)
         menu.addItem(rotation)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","); settingsItem.target = self; menu.addItem(settingsItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Wallpaper Rotation", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); quit.target = NSApp; menu.addItem(quit)
+    }
+    private func updateRotationMenuItem(_ item: NSMenuItem) {
+        item.title = configuration.rotationEnabled ? "Pause Rotation" : "Resume Rotation"
+        item.state = configuration.rotationEnabled ? .on : .off
+        item.isEnabled = configuration.rotationEnabled || canEnableRequestedRotation
     }
     @objc private func menuCancelDownload() { cancelDownload() }
     @objc private func menuDownloadSet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { downloadSet(id) } }
