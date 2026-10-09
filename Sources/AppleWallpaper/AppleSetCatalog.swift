@@ -23,7 +23,7 @@ public enum AppleWallpaperError: Error, LocalizedError {
     }
 }
 
-/// Reads Apple's native catalog. It never fetches URLs or manages Apple's media.
+/// Reads Apple's native catalog, including the download locations supplied by Apple.
 public struct AppleSetCatalog {
     public let manifestURL: URL
     public let fallbackManifestURL: URL
@@ -64,7 +64,8 @@ public struct AppleSetCatalog {
                     let localPreview = previewDirectory.appendingPathComponent(entry.id + ".png")
                     return WallpaperAsset(id: entry.id, shotID: entry.shotID, name: readableName(entry),
                         previewURL: FileManager.default.fileExists(atPath: localPreview.path) ? localPreview : nil,
-                        videoURL: videosDirectory.appendingPathComponent(entry.id + ".mov"))
+                        videoURL: videosDirectory.appendingPathComponent(entry.id + ".mov"),
+                        downloadURL: entry.downloadURL)
                 }
                 var mapping: [WallpaperPhase: String] = [:]
                 var review = false
@@ -125,5 +126,11 @@ public struct AppleSetCatalog {
     private struct Entry: Decodable {
         let id: String; let shotID: String; let accessibilityLabel: String
         let localizedNameKey: String; let subcategories: [String]
+        let downloadURL: URL?
+
+        enum CodingKeys: String, CodingKey {
+            case id, shotID, accessibilityLabel, localizedNameKey, subcategories
+            case downloadURL = "url-4K-SDR-240FPS"
+        }
     }
 }

@@ -1,8 +1,9 @@
 # Wallpaper Rotation
 
 A small native macOS menu bar app that rotates Apple's aerial wallpaper and
-matching screen saver around sunrise and sunset. It uses the downloaded native
-movies; it does not render video itself. No third-party packages or subscriptions.
+matching screen saver around sunrise and sunset. It uses native Apple
+movies and can download missing scenes directly from Apple’s catalog. It does not
+render video itself. No third-party packages or subscriptions.
 
 Requires **macOS 27 and Apple Silicon**. Apple's automatic appearance settings
 are preserved. Wallpaper changes follow solar times; Apple's theme can change
@@ -10,11 +11,11 @@ later because Auto appearance waits for idle time.
 
 | Time | Scene |
 | --- | --- |
-| Hour before sunrise | Evening |
-| Sunrise to one hour afterward | Sunset |
+| Hour before sunrise | Dusk / Dawn |
+| Sunrise to one hour afterward | Sunset / Sunrise |
 | One hour after sunrise to one hour before sunset | Day |
-| Hour before sunset | Sunset |
-| Sunset to one hour afterward | Evening |
+| Hour before sunset | Sunset / Sunrise |
+| Sunset to one hour afterward | Dusk / Dawn |
 | Remaining nighttime | Night |
 
 ## Build
@@ -35,9 +36,12 @@ building. It does not create certificates, alter Keychain, or notarize a release
 ## Use
 
 1. Move the app to a stable location, such as `~/Applications`, and open it.
-2. Select an Apple collection. Golden Gate is the default. Download any missing
-   scenes through Apple's Wallpaper settings. Review proposed role mappings
-   for unfamiliar sets.
+2. Select an Apple collection. Golden Gate is the default. Use **Download Set**
+   in Settings, or **Download [set]…** in the menu, for missing scenes. Downloads
+   come from Apple’s catalog and save to the native movie cache. Completed Apple
+   downloads are recognized automatically; partial movies stay unavailable.
+   Review proposed role mappings for unfamiliar sets. Download completion leaves
+   your current wallpaper and rotation selection intact until you confirm the set.
 3. Use **Change…** in Location to choose this Mac’s location or provide coordinates. A saved location supports
    temporary outages; location updates use occasional one-shot requests.
 4. Enable **Rotation**. If this OS build has not been checked, the app briefly
