@@ -2,7 +2,14 @@ import Foundation
 
 public enum WallpaperPhase: String, CaseIterable, Codable, Sendable {
     case day, sunset, evening, night
-    public var title: String { rawValue.capitalized }
+    public var title: String {
+        switch self {
+        case .day: "Day"
+        case .sunset: "Sunset / Sunrise"
+        case .evening: "Dusk / Dawn"
+        case .night: "Night"
+        }
+    }
 }
 
 public struct Coordinate: Codable, Equatable, Sendable {

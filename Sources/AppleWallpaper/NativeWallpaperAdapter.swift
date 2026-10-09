@@ -132,10 +132,7 @@ public final class NativeWallpaperAdapter: NativeWallpaperApplying {
 
     public static func nativeAssetAvailable(_ id: String) throws -> Bool {
         guard let asset = try AppleSetCatalog().discover().flatMap(\.assets).first(where: { $0.id == id }) else { return false }
-        // Resolve Apple's legitimate cached-asset aliases; do not copy or open media.
-        let movie = asset.videoURL.resolvingSymlinksInPath()
-        guard let values = try? movie.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else { return false }
-        return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+        return asset.isDownloaded
     }
 
     private func locked<T>(_ operation: () throws -> T) rethrows -> T {

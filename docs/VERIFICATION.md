@@ -99,3 +99,50 @@ samples; 90,720–95,088 KiB RSS (88.6–92.9 MiB). The warm closed-window footp
 still exceeds 50 MiB (tracked in issue #2); this short run is not a leak test.
 The controller detaches previews and its document graph on close, but AppKit may
 retain process allocations. Higher open-Settings memory is permitted by the user.
+
+## Scene-set downloads 0.3
+
+80 integrated fixtures passed: 16 persistence/event/thumbnail, 22 core/policy,
+42 catalog/adapter/movie/download. The 19 dedicated movie/catalog/downloader
+fixtures use an injected transport and disposable generated raw video; they make
+no network requests. They cover missing-only transfers, failures, cancellation,
+concurrent destination preservation, URL/HTTP/size checks, movie validation and
+bounded progress. Seven real FSEvents tests include same-inode nonempty movie
+completion, manifest edits, missing directories, atomic file/folder replacement
+and observer cleanup. Event tests require normal macOS service access; the local
+execution sandbox rejected FSEventStreamStart, so these ran outside that sandbox.
+
+The release app and embedded helper built, plist lint and strict ad-hoc signature
+verification passed. A read-only probe recognized all 16 current native movies as
+complete, including Tahoe’s four scenes. Actual private rendered captures show
+Tahoe downloaded without stale labels, the missing-set Download Set button, and
+Download Sonoma… in the menu. Disabled controls in those captures are intentional
+read-only QA. New Sunset/Sunrise and Dusk/Dawn display labels preserve stored
+phase identifiers. Download completion never selects or applies the browsed set.
+
+Snark’s first weighted download-feature review scored 8.5/10 with no blocking
+findings (correctness 2.2, safety 2.3, maintainability 1.2, evidence 1.1, UI 0.8,
+updates 0.9). The quit cleanup finding was fixed before scoring: normal quit
+awaits cancelled transfer cleanup. Final polish removes duplicate paused menu
+lines and clarifies that extra set files are available rather than mandatory.
+A complete production CDN movie transfer remains unverified; fixture evidence
+must not be presented as proof of a live Apple download. No Apple media, private
+screenshots or local coordinates are committed.
+
+A real URLSession HEAD request to Tahoe Day’s native catalog URL returned HTTP
+200, Content-Length 467,039,502 and zero body bytes from sylvan.apple.com. This
+confirms endpoint/TLS reachability without downloading another movie; it does
+not establish successful complete production transfer or installation.
+
+### Bundled still previews
+
+Fresh read-only inspection of this Mac found local 214 × 130 PNG previews for
+all 97 assets in the 19 supported sets, independent of the 16 complete movies.
+All five Sonoma previews exist even though all five movies are absent. The
+Settings collection and scene menus use these local stills; no preview network
+request or movie download is required. Unknown phase assignments remain empty.
+The window owns a bounded thumbnail cache and releases its references on close.
+Two generated-PNG fixtures verify local-only bounded decoding, missing-preview
+retry and cache release. Actual native menu captures show all five undownloaded
+Sonoma scene stills and a representative still for each collection. Screenshots
+remain outside the repository.

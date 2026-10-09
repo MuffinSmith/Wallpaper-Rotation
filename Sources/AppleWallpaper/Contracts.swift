@@ -7,14 +7,13 @@ public struct WallpaperAsset: Codable, Equatable, Sendable, Identifiable {
     public let name: String
     public let previewURL: URL?
     public let videoURL: URL
+    public let downloadURL: URL?
     public var isDownloaded: Bool {
-        let movie = videoURL.resolvingSymlinksInPath()
-        guard let values = try? movie.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else { return false }
-        return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+        NativeMovieReadiness.isComplete(at: videoURL)
     }
-    public init(id: String, shotID: String, name: String, previewURL: URL?, videoURL: URL) {
+    public init(id: String, shotID: String, name: String, previewURL: URL?, videoURL: URL, downloadURL: URL? = nil) {
         self.id = id; self.shotID = shotID; self.name = name
-        self.previewURL = previewURL; self.videoURL = videoURL
+        self.previewURL = previewURL; self.videoURL = videoURL; self.downloadURL = downloadURL
     }
 }
 
@@ -79,4 +78,21 @@ public struct PendingWallpaperOperation: Codable, Sendable {
         self.schemaVersion = schemaVersion; self.assetID = assetID
         self.startedAt = startedAt; self.receipt = receipt; self.previousReceipt = previousReceipt
     }
+}
+
+/// Transient download presentation; never part of saved wallpaper ownership.
+public struct WallpaperDownloadProgress: Sendable {
+    public let completedCount: Int
+    public let totalCount: Int
+    public let fractionCompleted: Double?
+    public init(completedCount: Int, totalCount: Int, fractionCompleted: Double? = nil) {
+        self.completedCount = completedCount; self.totalCount = totalCount
+        self.fractionCompleted = fractionCompleted
+    }
+}
+
+@MainActor
+public protocol WallpaperDownloading: AnyObject {
+    func download(assets: [WallpaperAsset], onProgress: @escaping @MainActor @Sendable (WallpaperDownloadProgress) -> Void) async throws
+    func cancel()
 }

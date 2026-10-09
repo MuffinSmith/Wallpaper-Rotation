@@ -15,6 +15,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var currentFix: LocationFix?
     private(set) var configurationLoadError: String?
     private var statusItem: NSStatusItem!
+    private var menuTracking = false
+    private var terminationPending = false
     private var settings: SettingsWindowController?
     private var timer: Timer?
     private var watch: DispatchSourceFileSystemObject?
@@ -35,6 +37,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var visualPanel: NSPanel?
     private var recoveryUncertain = false
     private var pendingApply: PendingVisualVerification?
+    private var downloadTask: Task<Void, Never>?
+    private var downloader: WallpaperDownloader?
+    private var availabilityObserver: AssetAvailabilityObserver?
+    private(set) var downloadingSetID: String?
+    private(set) var downloadProgress: WallpaperDownloadProgress?
+    private var browsedSetID: String?
+    var downloadRunning: Bool { downloadTask != nil }
+    var browsedSet: WallpaperSet? { sets.first { $0.id == browsedSetID } ?? selectedSet }
     var verificationRunning: Bool { verificationProcess != nil || visualAssetID != nil }
 
     var selectedSet: WallpaperSet? {
@@ -45,7 +55,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     var nativeReady: Bool { inspection.map { AppStorage.smokePassed(for: $0) } ?? false }
     var canEnable: Bool {
-        !readOnly && configurationLoadError == nil && pendingApply == nil && watchFD >= 0 && !verificationRunning && inspection != nil && configuration.lastFix != nil && ready(selectedSet)
+        !readOnly && !terminationPending && configurationLoadError == nil && pendingApply == nil && watchFD >= 0 && !verificationRunning && inspection != nil && configuration.lastFix != nil && ready(selectedSet)
     }
     var readiness: String {
         if readOnly { return "Read-only preview: no settings or wallpaper changes." }
@@ -105,6 +115,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !readOnly {
             recoverPendingApply()
             beginWatching()
+            let catalog = AppleSetCatalog()
+            availabilityObserver = AssetAvailabilityObserver(
+                directories: [catalog.videosDirectory, catalog.manifestURL.deletingLastPathComponent()]) { [weak self] in
+                    self?.refreshAvailability()
+                }
+            availabilityObserver?.start()
+            NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
+                name: NSApplication.didBecomeActiveNotification, object: nil)
             recoverPendingVisualVerification()
             let workspace = NSWorkspace.shared.notificationCenter
             workspace.addObserver(self, selector: #selector(lifecycleChanged), name: NSWorkspace.didWakeNotification, object: nil)
@@ -119,8 +137,25 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             requestAutomaticLocationIfNeeded(force: true)
         }
+        // Read-only QA can inspect a collection without changing the saved set.
+        if readOnly, let index = CommandLine.arguments.firstIndex(of: "--preview-set"),
+           CommandLine.arguments.indices.contains(index + 1),
+           sets.contains(where: { $0.id == CommandLine.arguments[index + 1] }) {
+            browsedSetID = CommandLine.arguments[index + 1]
+        }
         render()
+        if readOnly && CommandLine.arguments.contains("--show-menu") {
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.statusItem.button?.performClick(nil) }
+            }
+        }
         if !CommandLine.arguments.contains("--hide-settings") && (readOnly || configuration.receipt == nil || visualAssetID != nil || pendingApply != nil) { showSettings() }
+        if readOnly && (CommandLine.arguments.contains("--show-set-choices") || CommandLine.arguments.contains("--show-scene-choices")) {
+            let showSets = CommandLine.arguments.contains("--show-set-choices")
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.settings?.showPreviewMenuForQA(showSets: showSets) }
+            }
+        }
         if readOnly && CommandLine.arguments.contains("--close-settings-after-preview") {
             Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(closeReadOnlySettings), userInfo: nil, repeats: false)
         }
@@ -138,16 +173,32 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func closeReadOnlySettings() { guard readOnly else { return }; settings?.close() }
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate(); changeDebounce?.invalidate(); watch?.cancel()
+        availabilityObserver?.stop()
+        downloadTask?.cancel(); downloader?.cancel()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if verificationProcess != nil { message = "Wait for the native check to restore your setup before quitting."; render(); return .terminateCancel }
         if visualAssetID != nil && !finishVisualVerification(record: false) { return .terminateCancel }
+        if let pendingDownload = downloadTask {
+            if !terminationPending {
+                terminationPending = true
+                cancelDownload()
+                Task { @MainActor in
+                    await pendingDownload.value
+                    // Give the download's cleanup defers time to remove its staging file.
+                    NSApp.reply(toApplicationShouldTerminate: true)
+                }
+            }
+            return .terminateLater
+        }
         return .terminateNow
     }
     func menuWillOpen(_ menu: NSMenu) {
-        inspection = try? adapter.inspect()
-        renderMenu()
+        menuTracking = false
+        refreshAvailability()
+        menuTracking = true
     }
+    func menuDidClose(_ menu: NSMenu) { menuTracking = false; renderMenu() }
 
     func mapping(for set: WallpaperSet) -> [WallpaperPhase: String] { configuration.mappings[set.id] ?? set.suggestedMapping }
     func ready(_ set: WallpaperSet?) -> Bool {
@@ -166,16 +217,56 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         recalculate(apply: false)
     }
+    func refreshAvailability() { refreshCatalog() }
+    @objc private func availabilityMayHaveChanged() { refreshAvailability() }
     func select(_ id: String) {
         guard let candidate = sets.first(where: { $0.id == id }) else { return }
+        browsedSetID = id
         guard ready(candidate) else {
             showSettings(); settings?.inspectSet(id)
-            if WallpaperPhase.allCases.contains(where: { candidate.asset(for: $0, mapping: mapping(for: candidate))?.isDownloaded == false }) { openWallpaperSettings() }
             return
         }
         guard !readOnly else { settings?.inspectSet(id); return }
         configuration.selectedSetID = id
         if persist() { recalculate(apply: configuration.rotationEnabled) }
+    }
+    func downloadSet(_ id: String) {
+        guard !readOnly, !terminationPending, !downloadRunning, let set = sets.first(where: { $0.id == id }) else { return }
+        browsedSetID = id
+        let missing = set.assets.filter { !$0.isDownloaded }
+        guard !missing.isEmpty else { message = "All scenes are downloaded."; refreshAvailability(); return }
+        let available = missing.filter { $0.downloadURL != nil }
+        guard !available.isEmpty else { openWallpaperSettings(); return }
+        let service = WallpaperDownloader()
+        downloader = service
+        downloadingSetID = id
+        downloadProgress = WallpaperDownloadProgress(completedCount: 0, totalCount: available.count)
+        message = ""
+        downloadTask = Task { [weak self] in
+            do {
+                try await service.download(assets: available) { [weak self] progress in
+                    self?.downloadProgress = progress; self?.render()
+                }
+                guard let self else { return }
+                self.message = set.assets.allSatisfy(\.isDownloaded)
+                    ? "Downloads complete. Review the scenes, then use this set."
+                    : "Available downloads finished. Remaining scenes need Apple Wallpaper settings."
+            } catch is CancellationError {
+                self?.message = "Download cancelled. Completed scenes are kept."
+            } catch {
+                self?.message = "Download could not finish: \(error.localizedDescription)"
+            }
+            guard let self else { return }
+            self.downloadTask = nil; self.downloader = nil
+            self.downloadingSetID = nil; self.downloadProgress = nil
+            self.refreshAvailability()
+        }
+        render()
+    }
+    func cancelDownload() {
+        guard !readOnly, downloadRunning else { return }
+        downloadTask?.cancel(); downloader?.cancel()
+        message = "Cancelling download…"; render()
     }
     func confirmMapping(setID: String, value: [WallpaperPhase: String]) {
         guard !readOnly, let set = sets.first(where: { $0.id == setID }),
@@ -530,30 +621,60 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch { message = "Temporary scene restoration failed: \(error.localizedDescription). Recovery is retained; retry Restore & Cancel before quitting."; render(); return false }
     }
     @objc func showSettings() {
+        refreshAvailability()
         if settings == nil { settings = SettingsWindowController(coordinator: self) }
         settings?.showWindow(nil); NSApp.activate(); settings?.window?.makeKeyAndOrderFront(nil)
         settings?.render()
     }
     func settingsClosed() { settings = nil }
     private func render() { if statusItem != nil { renderMenu() }; settings?.render() }
+    private var menuScheduleTitle: String {
+        if !configuration.rotationEnabled, let reason = configuration.pauseReason { return "Paused: \(reason)" }
+        return nextTitle
+    }
     private func renderMenu() {
         guard let menu = statusItem?.menu else { return }
+        if menuTracking {
+            // Keep the tracked menu stable while byte progress and file events arrive.
+            // Rebuilding it can move the item underneath the user's pointer.
+            menu.items.first?.title = currentTitle
+            if menu.items.count > 1 { menu.items[1].title = menuScheduleTitle }
+            if let item = menu.items.first(where: { $0.identifier?.rawValue == "download-status" }) {
+                let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
+                let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
+                item.title = downloadRunning ? "Downloading \(name)\(progress)…" : "Download finished — see Settings"
+            }
+            menu.items.first(where: { $0.identifier?.rawValue == "cancel-download" })?.isEnabled = downloadRunning && !readOnly
+            return
+        }
         menu.removeAllItems()
         let current = NSMenuItem(title: currentTitle, action: nil, keyEquivalent: ""); current.isEnabled = false; menu.addItem(current)
-        let next = NSMenuItem(title: nextTitle, action: nil, keyEquivalent: ""); next.isEnabled = false; menu.addItem(next)
-        if !configuration.rotationEnabled, let reason = configuration.pauseReason {
-            let item = NSMenuItem(title: "Paused: \(reason)", action: nil, keyEquivalent: ""); item.isEnabled = false; menu.addItem(item)
-        }
+        let next = NSMenuItem(title: menuScheduleTitle, action: nil, keyEquivalent: ""); next.isEnabled = false; menu.addItem(next)
         menu.addItem(.separator())
         let setItem = NSMenuItem(title: "Wallpaper Set", action: nil, keyEquivalent: "")
         let submenu = NSMenu(); submenu.autoenablesItems = false
         for set in sets {
-            let suffix = ready(set) ? "" : (set.requiresReview && configuration.mappings[set.id] == nil ? " — Review…" : " — Download required…")
+            let needsDownload = set.assets.contains { !$0.isDownloaded }
+            let suffix = ready(set) ? "" : (needsDownload ? " — Download…" : " — Review…")
             let item = NSMenuItem(title: set.name + suffix, action: #selector(menuSelectedSet(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = set.id; item.state = selectedSet?.id == set.id ? .on : .off
             submenu.addItem(item)
         }
         setItem.submenu = submenu; menu.addItem(setItem)
+        if downloadRunning {
+            let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
+            let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
+            let item = NSMenuItem(title: "Downloading \(name)\(progress)…", action: nil, keyEquivalent: "")
+            item.identifier = NSUserInterfaceItemIdentifier("download-status")
+            item.isEnabled = false; menu.addItem(item)
+            let cancel = NSMenuItem(title: "Cancel Download", action: #selector(menuCancelDownload), keyEquivalent: "")
+            cancel.identifier = NSUserInterfaceItemIdentifier("cancel-download")
+            cancel.target = self; cancel.isEnabled = !readOnly; menu.addItem(cancel)
+        } else if let set = browsedSet, set.assets.contains(where: { !$0.isDownloaded }) {
+            let download = NSMenuItem(title: "Download \(set.name)…", action: #selector(menuDownloadSet(_:)), keyEquivalent: "")
+            download.target = self; download.representedObject = set.id; download.isEnabled = !readOnly
+            menu.addItem(download)
+        }
         let rotation = NSMenuItem(title: "Rotation Enabled", action: #selector(toggleRotation), keyEquivalent: "")
         rotation.target = self; rotation.state = configuration.rotationEnabled ? .on : .off; rotation.isEnabled = configuration.rotationEnabled || canEnable
         menu.addItem(rotation)
@@ -561,6 +682,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Wallpaper Rotation", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); quit.target = NSApp; menu.addItem(quit)
     }
+    @objc private func menuCancelDownload() { cancelDownload() }
+    @objc private func menuDownloadSet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { downloadSet(id) } }
     @objc private func menuSelectedSet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { select(id) } }
     func formatTime(_ date: Date) -> String {
         let formatter = DateFormatter(); formatter.timeStyle = .short; formatter.dateStyle = .none; return formatter.string(from: date)

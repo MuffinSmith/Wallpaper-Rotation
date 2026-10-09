@@ -20,6 +20,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let locationDetail = NSTextField(wrappingLabelWithString: "")
     private let customizeButton = NSButton(title: "Customize Scenes…", target: nil, action: nil)
     private let mappingButton = NSButton(title: "Save Scenes", target: nil, action: nil)
+    private let downloadButton = NSButton(title: "Download Set", target: nil, action: nil)
+    private let downloadStatus = NSTextField(wrappingLabelWithString: "")
+    private let downloadIndicator = NSProgressIndicator()
+    private let downloadProgressLabel = NSTextField(labelWithString: "")
+    private let cancelDownloadButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let downloadFallbackButton = NSButton(title: "Open Wallpaper Settings…", target: nil, action: nil)
+    private let downloadProgressRow = NSStackView()
     private let restoreButton = NSButton(title: "Restore Previous Setup…", target: nil, action: nil)
     private let moreButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let scheduleRows = NSStackView()
@@ -31,7 +38,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var draftSetID: String?
     private var draftMapping: [WallpaperPhase: String] = [:]
     private var renderedSet: WallpaperSet?
-    private var previewIDs: [WallpaperPhase: String] = [:]
+    private let thumbnails = SceneThumbnailCache()
     private var customizationExpanded = false
     private var hasDraftEdits = false
     private var documentView: NSView?
@@ -130,6 +137,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         setPicker.target = self; setPicker.action = #selector(setChanged)
         setPicker.widthAnchor.constraint(equalToConstant: 330).isActive = true
         setPicker.setAccessibilityLabel("Wallpaper set")
+        setPicker.imagePosition = .noImage
+        setPicker.lineBreakMode = .byTruncatingTail
         let selection = row([label("Wallpaper Set"), spacer(), setPicker])
         let gallery = row([], spacing: 12)
         gallery.distribution = .fillEqually; gallery.alignment = .top
@@ -137,11 +146,29 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             let preview = ScenePreviewView()
             preview.setAccessibilityLabel("\(phase.title) wallpaper preview")
             let caption = label(phase.title, size: 12, weight: .medium)
+            caption.alignment = .center; caption.lineBreakMode = .byWordWrapping; caption.maximumNumberOfLines = 2
             let card = vertical([preview, caption], spacing: 7); card.alignment = .centerX
+            caption.widthAnchor.constraint(equalTo: card.widthAnchor).isActive = true
             preview.widthAnchor.constraint(equalTo: card.widthAnchor).isActive = true
             preview.heightAnchor.constraint(equalTo: preview.widthAnchor, multiplier: 0.64).isActive = true
             gallery.addArrangedSubview(card); previews[phase] = preview
         }
+        downloadStatus.font = .systemFont(ofSize: 12); downloadStatus.textColor = .secondaryLabelColor
+        downloadStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        downloadButton.target = self; downloadButton.action = #selector(downloadSet)
+        downloadButton.bezelStyle = .rounded
+        let downloadRow = row([downloadStatus, spacer(), downloadButton])
+        downloadIndicator.style = .bar; downloadIndicator.minValue = 0; downloadIndicator.maxValue = 1
+        downloadIndicator.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        downloadProgressLabel.font = .systemFont(ofSize: 12); downloadProgressLabel.textColor = .secondaryLabelColor
+        downloadProgressLabel.lineBreakMode = .byTruncatingMiddle
+        downloadProgressLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        cancelDownloadButton.target = self; cancelDownloadButton.action = #selector(cancelDownload)
+        cancelDownloadButton.bezelStyle = .inline
+        downloadProgressRow.orientation = .horizontal; downloadProgressRow.alignment = .centerY; downloadProgressRow.spacing = 10
+        for view in [downloadIndicator, downloadProgressLabel, spacer(), cancelDownloadButton] { downloadProgressRow.addArrangedSubview(view) }
+        downloadFallbackButton.target = self; downloadFallbackButton.action = #selector(openWallpaper)
+        downloadFallbackButton.bezelStyle = .inline; downloadFallbackButton.alignment = .left
         customizeButton.target = self; customizeButton.action = #selector(toggleCustomization)
         customizeButton.bezelStyle = .inline
         mappingButton.target = self; mappingButton.action = #selector(confirmMapping)
@@ -156,15 +183,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             picker.target = self; picker.action = #selector(roleChanged(_:))
             picker.identifier = NSUserInterfaceItemIdentifier(phase.rawValue)
             picker.setAccessibilityLabel("Scene for \(phase.title)")
+            picker.imagePosition = .noImage
+            picker.lineBreakMode = .byTruncatingTail
             picker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             let caption = label(phase.title)
-            caption.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            caption.widthAnchor.constraint(equalToConstant: 120).isActive = true
             let mappingRow = row([caption, picker])
             customization.addArrangedSubview(mappingRow)
             mappingRow.widthAnchor.constraint(equalTo: customization.widthAnchor).isActive = true
             rolePickers[phase] = picker
         }
-        form.addArrangedSubview(section("Scenes", views: [selection, gallery, sceneActions, customization]))
+        form.addArrangedSubview(section("Scenes", views: [selection, gallery, downloadRow, downloadProgressRow, downloadFallbackButton, sceneActions, customization]))
 
         scheduleRows.orientation = .vertical; scheduleRows.alignment = .leading; scheduleRows.spacing = 0
         scheduleDateLabel.font = .systemFont(ofSize: 12); scheduleDateLabel.textColor = .secondaryLabelColor
@@ -218,28 +247,55 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         messageLabel.stringValue = coordinator.message
         messageLabel.isHidden = coordinator.message.isEmpty || routineMessages.contains(coordinator.message)
 
-        let id = draftSetID ?? coordinator.selectedSet?.id
+        let id = draftSetID ?? coordinator.browsedSet?.id ?? coordinator.selectedSet?.id
         let set = coordinator.sets.first { $0.id == id }
-        setPicker.removeAllItems()
-        for item in coordinator.sets {
-            setPicker.addItem(withTitle: item.name); setPicker.lastItem?.representedObject = item.id
-        }
-        if let id, let index = coordinator.sets.firstIndex(where: { $0.id == id }) { setPicker.selectItem(at: index) }
-        setPicker.isEnabled = !coordinator.readOnly
-        if renderedSet != set {
-            renderedSet = set; draftMapping = set.map(coordinator.mapping) ?? [:]; hasDraftEdits = false
-            for phase in WallpaperPhase.allCases {
-                guard let picker = rolePickers[phase] else { continue }
-                picker.removeAllItems(); picker.addItem(withTitle: "Choose an Apple scene…")
-                if let set {
-                    for asset in set.assets {
-                        picker.addItem(withTitle: asset.name + (asset.isDownloaded ? "" : " — Download required"))
-                        picker.lastItem?.representedObject = asset.id
-                    }
-                    if let assetID = draftMapping[phase], let index = set.assets.firstIndex(where: { $0.id == assetID }) { picker.selectItem(at: index + 1) }
-                }
-                picker.isEnabled = !coordinator.readOnly
+        let existingSets = setPicker.itemArray.compactMap { $0.representedObject as? String }
+        if existingSets != coordinator.sets.map(\.id) {
+            setPicker.removeAllItems()
+            for item in coordinator.sets {
+                setPicker.addItem(withTitle: item.name); setPicker.lastItem?.representedObject = item.id
             }
+        }
+        for (index, item) in coordinator.sets.enumerated() {
+            let menuItem = setPicker.item(at: index)
+            menuItem?.title = item.name
+            // This only illustrates the collection; it does not assign a phase.
+            let representative = item.asset(for: .day, mapping: coordinator.mapping(for: item)) ?? item.assets.first
+            menuItem?.image = thumbnails.image(at: representative?.previewURL, size: .menu)
+        }
+        if let id, let index = coordinator.sets.firstIndex(where: { $0.id == id }), setPicker.indexOfSelectedItem != index {
+            setPicker.selectItem(at: index)
+        }
+        updateSelectedTitle(of: setPicker)
+        setPicker.isEnabled = !coordinator.readOnly
+        // Movie availability is a live filesystem property, so equality of
+        // catalog models cannot tell us whether picker labels need refreshing.
+        if renderedSet?.id != set?.id {
+            draftMapping = set.map(coordinator.mapping) ?? [:]; hasDraftEdits = false
+        }
+        renderedSet = set
+        for phase in WallpaperPhase.allCases {
+            guard let picker = rolePickers[phase] else { continue }
+            let assets = set?.assets ?? []
+            let existing = picker.itemArray.dropFirst().compactMap { $0.representedObject as? String }
+            if picker.numberOfItems == 0 || existing != assets.map(\.id) {
+                picker.removeAllItems(); picker.addItem(withTitle: "Choose an Apple scene…")
+                for asset in assets {
+                    picker.addItem(withTitle: asset.name)
+                    picker.lastItem?.representedObject = asset.id
+                }
+            }
+            // Update status in place; rebuilding a tracked popup during byte
+            // progress can move the item underneath the user's pointer.
+            for (index, asset) in assets.enumerated() {
+                let menuItem = picker.item(at: index + 1)
+                menuItem?.title = asset.name + (asset.isDownloaded ? "" : " — Download required")
+                menuItem?.image = thumbnails.image(at: asset.previewURL, size: .menu)
+            }
+            let selected = draftMapping[phase].flatMap { id in assets.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0
+            if picker.indexOfSelectedItem != selected { picker.selectItem(at: selected) }
+            updateSelectedTitle(of: picker)
+            picker.isEnabled = !coordinator.readOnly
         }
         let needsReview = set.map { $0.requiresReview && coordinator.configuration.mappings[$0.id] == nil } ?? false
         customization.isHidden = !customizationExpanded && !needsReview
@@ -249,6 +305,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         mappingButton.title = needsReview ? "Confirm Scenes" : (set?.id == coordinator.selectedSet?.id ? "Save Scenes" : "Use This Set")
         mappingButton.isEnabled = !coordinator.readOnly && selectedDownloaded
         mappingHelp.stringValue = needsReview ? "Review the four scenes before using this set. Your current wallpaper will stay in place." : "Choose the Apple scene to use at each time of day."
+        renderDownloads(set: set, needsReview: needsReview, selectedDownloaded: selectedDownloaded)
         loadPreviews()
         renderSchedule()
         renderLocation()
@@ -265,6 +322,45 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         moreButton.isEnabled = !coordinator.readOnly
         restoreButton.isHidden = coordinator.configuration.receipt == nil
         restoreButton.isEnabled = !coordinator.readOnly && !coordinator.verificationRunning
+    }
+    private func renderDownloads(set: WallpaperSet?, needsReview: Bool, selectedDownloaded: Bool) {
+        let missing = set?.assets.filter { !$0.isDownloaded } ?? []
+        let downloadable = missing.filter { $0.downloadURL != nil }
+        let unavailable = missing.count - downloadable.count
+        downloadButton.isHidden = missing.isEmpty
+        downloadButton.title = downloadable.isEmpty ? "Download in Apple Settings…" : "Download Set"
+        downloadButton.isEnabled = !coordinator.readOnly && !coordinator.downloadRunning
+        downloadFallbackButton.isHidden = unavailable == 0 || downloadable.isEmpty
+        downloadFallbackButton.isEnabled = !coordinator.readOnly
+        if set == nil {
+            downloadStatus.stringValue = "Choose an Apple wallpaper set."
+        } else if missing.isEmpty {
+            downloadStatus.stringValue = needsReview ? "Downloaded. Review the four scene choices below." : "Downloaded and ready to use."
+        } else if selectedDownloaded {
+            downloadStatus.stringValue = "Your chosen scenes are ready. \(missing.count) other \(missing.count == 1 ? "scene is" : "scenes are") available to download."
+        } else if unavailable > 0 {
+            downloadStatus.stringValue = downloadable.isEmpty
+                ? "\(unavailable) \(unavailable == 1 ? "scene needs" : "scenes need") to be downloaded in Apple Wallpaper Settings."
+                : "\(missing.count) scenes are missing. \(unavailable) must be downloaded in Apple Wallpaper Settings."
+        } else {
+            downloadStatus.stringValue = "\(missing.count) \(missing.count == 1 ? "scene is" : "scenes are") available to download."
+        }
+        downloadProgressRow.isHidden = !coordinator.downloadRunning
+        cancelDownloadButton.isEnabled = !coordinator.readOnly
+        guard coordinator.downloadRunning else { downloadIndicator.stopAnimation(nil); return }
+        let name = coordinator.sets.first { $0.id == coordinator.downloadingSetID }?.name ?? "wallpaper set"
+        if let progress = coordinator.downloadProgress {
+            downloadProgressLabel.stringValue = "\(name) · \(progress.completedCount) of \(progress.totalCount) scenes"
+            if let fraction = progress.fractionCompleted, fraction.isFinite {
+                downloadIndicator.isIndeterminate = false; downloadIndicator.stopAnimation(nil)
+                downloadIndicator.doubleValue = min(1, max(0, fraction))
+            } else {
+                downloadIndicator.isIndeterminate = true; downloadIndicator.startAnimation(nil)
+            }
+        } else {
+            downloadProgressLabel.stringValue = "Preparing \(name)…"
+            downloadIndicator.isIndeterminate = true; downloadIndicator.startAnimation(nil)
+        }
     }
     private func renderSchedule() {
         let todayFormatter = DateFormatter(); todayFormatter.setLocalizedDateFormatFromTemplate("EEEEMMMd")
@@ -317,27 +413,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let source = fix.source == "Manual coordinates" ? "Saved coordinates" : "Saved Mac location"
         locationDetail.stringValue = "\(source) · Updated \(date.string(from: fix.capturedAt))"
     }
+    private func updateSelectedTitle(of picker: NSPopUpButton) {
+        guard let cell = picker.cell as? NSPopUpButtonCell else { return }
+        let title = picker.selectedItem?.title ?? ""
+        // A separate text-only display item keeps 30-point menu previews out
+        // of the compact button, without changing the actual menu selection.
+        if cell.usesItemFromMenu {
+            cell.usesItemFromMenu = false
+            cell.menuItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        } else {
+            cell.menuItem?.title = title
+        }
+    }
     private func loadPreviews() {
         let actual = Set(coordinator.inspection?.selections.values.map { $0 } ?? [])
         for phase in WallpaperPhase.allCases {
             let asset = renderedSet?.asset(for: phase, mapping: draftMapping)
             previews[phase]?.isCurrent = asset.map { actual.count == 1 && actual.contains($0.id) } ?? false
-            if previewIDs[phase] == asset?.id { continue }
-            previews[phase]?.image = nil; previewIDs[phase] = asset?.id
-            guard let url = asset?.previewURL, url.isFileURL,
-                  let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                  let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 420,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceShouldCacheImmediately: true
-                  ] as CFDictionary) else { continue }
-            previews[phase]?.image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+            previews[phase]?.placeholder = asset == nil && renderedSet?.assets.isEmpty == false
+                ? "Choose a scene" : "Preview unavailable"
+            // The URL can change after a catalog refresh without the asset ID changing.
+            // Failed decodes retry later, so a previously missing preview can recover.
+            let image = thumbnails.image(at: asset?.previewURL, size: .gallery)
+            if previews[phase]?.image !== image { previews[phase]?.image = image }
         }
     }
     func windowWillClose(_ notification: Notification) {
+        downloadIndicator.stopAnimation(nil)
         for preview in previews.values { preview.image = nil }
-        previews.removeAll(); previewIDs.removeAll(); rolePickers.removeAll()
+        setPicker.removeAllItems()
+        for picker in rolePickers.values { picker.removeAllItems() }
+        thumbnails.removeAll()
+        previews.removeAll(); rolePickers.removeAll()
         scrollView?.documentView = nil; documentView = nil; scrollView = nil
         coordinator.settingsClosed()
     }
@@ -411,12 +518,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         coordinator.saveManualLocation(Coordinate(latitude: lat, longitude: lon))
     }
+    @objc private func downloadSet() {
+        guard !coordinator.readOnly, let id = renderedSet?.id else { return }
+        if renderedSet?.assets.contains(where: { !$0.isDownloaded && $0.downloadURL != nil }) == true {
+            coordinator.downloadSet(id)
+        } else {
+            coordinator.openWallpaperSettings()
+        }
+    }
+    @objc private func cancelDownload() { guard !coordinator.readOnly else { return }; coordinator.cancelDownload() }
     @objc private func loginChanged() { coordinator.setStartAtLogin(loginSwitch.state == .on) }
     @objc private func openLoginSettings() { coordinator.openLoginSettings() }
     @objc private func openWallpaper() { coordinator.openWallpaperSettings() }
     @objc private func refresh() { coordinator.refreshCatalog() }
     @objc private func restore() { coordinator.restorePreviousSetup() }
     @objc private func rotationChanged() { coordinator.toggleRotation() }
+    // Read-only visual QA uses the same native menu as the interactive picker.
+    func showPreviewMenuForQA(showSets: Bool) {
+        guard coordinator.readOnly else { return }
+        if !showSets && customization.isHidden {
+            customizationExpanded = true
+            render()
+            window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        guard let picker = showSets ? setPicker : rolePickers[.day],
+              let menu = picker.menu else { return }
+        picker.scrollToVisible(picker.bounds)
+        menu.popUp(positioning: picker.selectedItem, at: NSPoint(x: 0, y: picker.bounds.maxY), in: picker)
+    }
     func saveSnapshot(to url: URL) {
         guard coordinator.readOnly, let view = documentView,
               let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
@@ -441,6 +570,7 @@ private final class SettingsGroupView: NSView {
 private final class ScenePreviewView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var isCurrent = false { didSet { if oldValue != isCurrent { needsDisplay = true } } }
+    var placeholder = "Preview unavailable" { didSet { if oldValue != placeholder { needsDisplay = true } } }
     override func draw(_ dirtyRect: NSRect) {
         let frame = bounds.insetBy(dx: 1, dy: 1)
         let shape = NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8)
@@ -454,7 +584,7 @@ private final class ScenePreviewView: NSView {
             image.draw(in: frame, from: source, operation: .sourceOver, fraction: 1, respectFlipped: true,
                        hints: [.interpolation: NSImageInterpolation.high.rawValue])
         } else {
-            let text = "Preview unavailable" as NSString
+            let text = placeholder as NSString
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
             let size = text.size(withAttributes: attributes)
             text.draw(at: NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2), withAttributes: attributes)
@@ -477,5 +607,60 @@ private final class PhaseDotView: NSView {
         case .night: color = .secondaryLabelColor
         }
         color.setFill(); NSBezierPath(ovalIn: bounds).fill()
+    }
+}
+
+/// Local still-image decoding only; owned and emptied by the Settings window.
+@MainActor
+final class SceneThumbnailCache {
+    enum Size { case menu, gallery }
+    private let images = NSCache<NSString, NSImage>()
+    private var failures: [String: Date] = [:]
+
+    init() {
+        images.countLimit = 128
+        images.totalCostLimit = 12 * 1_024 * 1_024
+    }
+
+    func image(at url: URL?, size: Size, now: Date = Date()) -> NSImage? {
+        guard let url, url.isFileURL else { return nil }
+        let pixelLimit = size == .menu ? 96 : 420
+        let key = "\(pixelLimit):\(url.absoluteString)"
+        if let cached = images.object(forKey: key as NSString) { return cached }
+        if let failed = failures[key], now.timeIntervalSince(failed) < 5 { return nil }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: pixelLimit,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else {
+            failures[key] = now
+            return nil
+        }
+        let image: NSImage
+        if size == .menu {
+            // A fixed 16:10 canvas gives native menus a consistent image column.
+            guard let context = CGContext(data: nil, width: 96, height: 60, bitsPerComponent: 8,
+                                          bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            let scale = max(96 / CGFloat(thumbnail.width), 60 / CGFloat(thumbnail.height))
+            let width = CGFloat(thumbnail.width) * scale, height = CGFloat(thumbnail.height) * scale
+            context.interpolationQuality = .high
+            context.draw(thumbnail, in: CGRect(x: (96 - width) / 2, y: (60 - height) / 2, width: width, height: height))
+            guard let cropped = context.makeImage() else { return nil }
+            image = NSImage(cgImage: cropped, size: NSSize(width: 48, height: 30))
+        } else {
+            image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+        }
+        failures[key] = nil
+        let cost = size == .menu ? 96 * 60 * 4 : thumbnail.bytesPerRow * thumbnail.height
+        images.setObject(image, forKey: key as NSString, cost: cost)
+        return image
+    }
+
+    func removeAll() {
+        images.removeAllObjects()
+        failures.removeAll()
     }
 }
