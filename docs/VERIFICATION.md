@@ -377,3 +377,67 @@ No new OS restart, actual overnight transition, every-Space inspection, screen
 saver playback, location authorization or resource benchmark is claimed.
 Rapid consecutive writes remain tracked in issue #8. Ambiguous original contexts
 are conservatively skipped during Restore Previous Setup and their evidence kept.
+
+## Midnight notification crash 0.3.5
+
+The repeated morning report had a different, directly observed cause: the app
+had terminated at 00:00:02 on October 10, while saved rotation remained enabled
+and Tahoe Night was active. The installed executable UUID matched the crash
+report. Core Foundation delivered its midnight notification on a background
+queue; an actor-isolated Objective-C selector asserted before entering its body.
+A background-posted calendar notification reproduced the same Swift executor
+trap on the previous code, with both failure log and generated crash retained
+privately. No administrator access is needed for wallpaper rotation. An optional
+login-item diagnostic unexpectedly requested it and was stopped.
+
+Both externally invoked notification selectors are now nonisolated and enqueue
+weakly captured MainActor work before reading coordinator state. Observation
+shutdown unregisters all eight event names and queued callbacks check shutdown
+on the main actor. This preserves existing compatibility, ownership, scheduling
+and conditional restoration gates without adding polling or a helper daemon.
+The native adapter, stored schema and solar calculations are unchanged.
+
+The full integrated suite passed 143 tests: 44 app, 22 core and 77 native. The
+optimized release notification suite passed 12 test declarations, including 40
+parameter combinations across calendar-day, time-zone, clock, wake, session,
+Space, display and application-activation events. These exercise background
+posting, immediate catch-up, idempotence, disabled rotation, actual external
+edits, and queued/post-shutdown notifications. The signed 0.3.5 build 10 passed
+plist lint and strict deep ad-hoc signature verification.
+
+A private native episode used the production worker, native store and directory
+watcher with an injected clock. It posted registered calendar-day and wake
+notifications from background tasks, kept Night without another native write,
+caught up to Tahoe Day, confirmed Apple's process held the matching movie and
+remained enabled for 15 seconds. Same-phase refresh made no native store write.
+The first episode's final harness assertion incorrectly compared exact selector
+paths across Apple's topology normalization; conditional restoration had completed
+and all current selections were the initial Night. That failure was retained.
+The corrected episode passed in 19.528 seconds, checking every restored current
+selector against the uniform original scene, a cleared private receipt, and
+byte-identical real saved configuration. The adapter's full configuration and
+context restoration checks were unchanged.
+
+The normal installed app then caught up to Day on startup using its real saved
+state and production readiness gates, with no flag migration. Its settings show
+Tahoe Day, rotation on, the next transition, and Start at Login on. A separate
+30-second observer checked every five seconds that all 32 native selectors were
+Day, rotation remained enabled, no operation was pending, semantic mappings and
+saved location were unchanged, and every original restoration entry remained
+intact. Apple's aerial process held the Tahoe Day movie. The first observer
+used an obsolete system movie directory for its final process-open check; its
+30-second state assertions passed, and the failed diagnostic was retained. The
+observer was corrected to the current Apple catalog's per-user movie directory
+and the entire observation repeated.
+
+Background notification injection establishes callback safety and native
+reconciliation; it does not substitute for another actual overnight wait or
+an OS restart. No fresh location authorization, every-Space inspection, screen
+saver playback or resource benchmark is claimed. Previous download and rapid
+consecutive-write limitations remain unchanged.
+
+Snark's independent first scored review passed at 9.4/10 with no blockers:
+correctness 2.4/2.5, safe settings handling 2.4/2.5, lightweight design 1.5/1.5,
+verification 1.35/1.5, interface 0.85/1 and update handling 0.9/1. The critic
+read the corrected installed observation and viewed the actual Settings image;
+no programming or native writes were performed by the critic.

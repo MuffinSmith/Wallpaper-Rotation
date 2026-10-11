@@ -34,6 +34,15 @@ UI readiness must represent observed success. Native compatibility is checked on
 explicit Enable; fixture tests cannot produce a passing live smoke report. Keep desired selections distinct from
 actual native state and reflect startup registration from macOS's own service.
 
+NotificationCenter selectors can be entered from a posting background thread.
+Keep external notification entrypoints nonisolated, then dispatch weakly captured
+work onto MainActor before reading coordinator state. An actor-isolated Objective-C
+entry can trap before its body, so a task inside that isolated body is insufficient.
+Cover calendar midnight, clock/time-zone changes and workspace/application events
+through actual observer registration with background-posting regressions, including
+an optimized build. Stop observation at shutdown and ignore queued deliveries after
+stopping. Main-run-loop UI actions and timers remain on their established boundary.
+
 Native transactions can wait for file locks, disk writes and Apple's wallpaper
 process. Keep them off the main actor, serialize each apply/restore episode, and
 retain its operation lease until ownership persistence and journal cleanup finish.

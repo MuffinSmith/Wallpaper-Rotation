@@ -177,8 +177,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self?.refreshAvailability()
                 }
             availabilityObserver?.start()
-            NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
-                name: NSApplication.didBecomeActiveNotification, object: nil)
             recoverPendingVisualVerification()
             startLifecycleObservation()
             runtimeReconciliationReady = true
@@ -223,7 +221,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     @objc private func closeReadOnlySettings() { guard readOnly else { return }; settings?.close() }
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate(); stopNativeObservation()
+        timer?.invalidate(); stopNativeObservation(); stopLifecycleObservation()
         availabilityObserver?.stop()
         downloadTask?.cancel(); downloader?.cancel()
     }
@@ -297,7 +295,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recalculate(apply: shouldApply)
     }
     func refreshAvailability() { refreshCatalog() }
-    @objc private func availabilityMayHaveChanged() { refreshAvailability() }
+    // NotificationCenter invokes selectors on the posting thread, including
+    // background calendar notifications. Hop before entering any actor-isolated code.
+    @objc nonisolated private func availabilityMayHaveChanged() {
+        Task { @MainActor [weak self] in
+            guard let self, self.lifecycleObservationStarted, !self.terminationPending else { return }
+            self.refreshAvailability()
+        }
+    }
     func select(_ id: String) {
         guard let candidate = sets.first(where: { $0.id == id }) else { return }
         browsedSetID = id
@@ -553,6 +558,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func startLifecycleObservation() {
         guard !readOnly, !lifecycleObservationStarted else { return }
         lifecycleObservationStarted = true
+        NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
@@ -563,7 +570,25 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: name, object: nil)
         }
     }
-    @objc private func lifecycleChanged() {
+    func stopLifecycleObservation() {
+        lifecycleObservationStarted = false
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.removeObserver(self, name: name, object: nil)
+        }
+        for name in [NSApplication.didBecomeActiveNotification, NSApplication.didChangeScreenParametersNotification,
+                     .NSSystemTimeZoneDidChange, .NSCalendarDayChanged, .NSSystemClockDidChange] {
+            NotificationCenter.default.removeObserver(self, name: name, object: nil)
+        }
+    }
+    @objc nonisolated private func lifecycleChanged() {
+        Task { @MainActor [weak self] in
+            guard let self, self.lifecycleObservationStarted, !self.terminationPending else { return }
+            self.reconcileLifecycleChange()
+        }
+    }
+    private func reconcileLifecycleChange() {
         guard !readOnly, runtimeReconciliationReady else { return }
         // Lifecycle reconciliation lets the adapter distinguish new contexts from changed owned ones.
         if configuration.rotationEnabled && checkOwnership() { recalculate(apply: true) }
