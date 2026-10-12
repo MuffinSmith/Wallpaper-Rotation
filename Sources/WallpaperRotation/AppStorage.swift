@@ -11,6 +11,7 @@ struct AppConfiguration: Codable {
     var lastFix: LocationFix?
     var rotationEnabled = false
     var pauseReason: String? = "Not enabled"
+    var automaticRecovery: AutomaticRecoveryPolicy?
 }
 
 typealias NativeVerification = NativeVerificationRecord

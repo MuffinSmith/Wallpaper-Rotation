@@ -38,3 +38,22 @@ settings it owns. A fresh OS build also requires a compatibility check on explic
 This resets the app's ownership claim without overwriting Apple's current
 settings. Raw `Index-*.plist` backups are inspection/recovery evidence; replacing
 the live store wholesale can overwrite later changes to unrelated settings.
+
+## Movies removed by macOS
+
+While rotation is enabled, missing movies in the confirmed four-scene mapping
+are restored automatically from Apple's catalog. Already downloaded movies are
+kept. Settings shows restoration progress; Pause Rotation cancels the transfer
+and keeps rotation paused. Manual pauses, outside wallpaper changes, uncertain
+pending operations and unsupported native stores are not automatically resumed.
+
+A failed transfer retries after five minutes, then fifteen minutes, then hourly.
+The budget survives app restarts and successful transfers followed by another
+purge. Check Downloads immediately recognizes files restored elsewhere without
+bypassing that budget. The app waits until the confirmed mapping is ready, then
+evaluates the current time before applying a scene.
+
+Private diagnostic events are saved in `recovery-events.jsonl` and its rotated
+`recovery-events.1.jsonl` beside `config.json`. Each file is limited to 256 KiB.
+They contain version, phase, asset identifiers and outcome codes, without saved
+coordinates or full restoration records. No administrator access is required.

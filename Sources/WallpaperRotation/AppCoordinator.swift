@@ -6,7 +6,7 @@ import Darwin
 
 @MainActor
 final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    let readOnly = CommandLine.arguments.contains("--read-only-smoke")
+    let readOnly: Bool
     private(set) var configuration = AppConfiguration()
     private(set) var sets: [WallpaperSet] = []
     private(set) var schedule: ScheduleSnapshot?
@@ -46,6 +46,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var downloadingSetID: String?
     private(set) var downloadProgress: WallpaperDownloadProgress?
     private var browsedSetID: String?
+    private(set) var automaticRecoveryStatus: String?
+    private(set) var downloadIsAutomatic = false
+    private var recoveryTimer: Timer?
+    private var recoveryGeneration = 0
+    private var lastReconcileEvent: String?
+    private var lastBackoffEvent: Date?
     private let nativeWorker: NativeApplyWorker
     private var nativeTask: Task<Void, Never>?
     private var queuedNativeApply = false
@@ -61,6 +67,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var replyToTermination: ((Bool) -> Void)? = nil
         var makeDownloader: (() -> any WallpaperDownloading)? = nil
         var runtimeReconciliationReady = true
+        var recordEvent: ((String, [String: String]) -> Void)? = nil
     }
     private let enableEnvironment: EnableEnvironment?
 
@@ -70,7 +77,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     init(configuration: AppConfiguration, sets: [WallpaperSet], enableEnvironment: EnableEnvironment?,
          nativeWorker: NativeApplyWorker = NativeApplyWorker(),
          nativeAdapter: NativeWallpaperAdapter = NativeWallpaperAdapter(),
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         readOnly: Bool = CommandLine.arguments.contains("--read-only-smoke")) {
+        self.readOnly = readOnly
         self.configuration = configuration
         self.sets = sets
         self.enableEnvironment = enableEnvironment
@@ -122,7 +131,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !configuration.rotationEnabled {
             if let selection = requestedRotationSelection, let problem = selection.problem(in: sets) { return problem }
             if requestedRotationSelection == nil { return "Choose a wallpaper set before enabling rotation." }
-        } else if !ready(selectedSet) { return "Review all four scenes and download their Apple assets before enabling." }
+        } else if let automaticRecoveryStatus { return automaticRecoveryStatus }
+        else if !ready(selectedSet) { return "Waiting for the mapped Apple scenes to become available." }
         if !nativeReady { return "Compatibility will be checked when you enable rotation." }
         return configuration.rotationEnabled ? "Rotation enabled" : "Paused: \(configuration.pauseReason ?? "By you")"
     }
@@ -163,6 +173,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             message = error.localizedDescription
         }
         if readOnly { configuration.rotationEnabled = false }
+        recordEvent("startup", fields: ["version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                                        "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"])
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "photo.on.rectangle", accessibilityDescription: "Wallpaper Rotation")
         statusItem.button?.image?.isTemplate = true
@@ -177,13 +189,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self?.refreshAvailability()
                 }
             availabilityObserver?.start()
-            NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
-                name: NSApplication.didBecomeActiveNotification, object: nil)
             recoverPendingVisualVerification()
             startLifecycleObservation()
             runtimeReconciliationReady = true
             if configuration.rotationEnabled {
-                if !canEnable || !nativeReady { pause("Compatibility or setup requires review") }
+                if !canPrepareRotation || !nativeReady { pause("Compatibility or setup requires review") }
                 else if checkOwnership() { recalculate(apply: true) }
             }
             requestAutomaticLocationIfNeeded(force: true)
@@ -223,11 +233,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     @objc private func closeReadOnlySettings() { guard readOnly else { return }; settings?.close() }
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate(); stopNativeObservation()
+        recordEvent("shutdown")
+        recoveryTimer?.invalidate(); recoveryTimer = nil
+        recoveryGeneration += 1
+        timer?.invalidate(); stopNativeObservation(); stopLifecycleObservation()
         availabilityObserver?.stop()
         downloadTask?.cancel(); downloader?.cancel()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        recoveryTimer?.invalidate(); recoveryTimer = nil
         if let operation = nativeTask {
             if !terminationPending {
                 terminationPending = true
@@ -293,11 +307,23 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func reconcileCurrentScene() {
         // Initial discovery precedes journal recovery and native observation.
         // Only an established runtime may catch up or claim current ownership.
-        let shouldApply = runtimeReconciliationReady && configuration.rotationEnabled && checkOwnership()
+        let shouldApply = !readOnly && runtimeReconciliationReady && configuration.rotationEnabled && checkOwnership()
+        let event = "\(configuration.rotationEnabled):\(selectedSet?.id ?? "none"):\(ready(selectedSet))"
+        if event != lastReconcileEvent {
+            lastReconcileEvent = event
+            recordEvent("reconcile", fields: ["reason": ready(selectedSet) ? "success" : "waiting"])
+        }
         recalculate(apply: shouldApply)
     }
     func refreshAvailability() { refreshCatalog() }
-    @objc private func availabilityMayHaveChanged() { refreshAvailability() }
+    // NotificationCenter invokes selectors on the posting thread, including
+    // background calendar notifications. Hop before entering any actor-isolated code.
+    @objc nonisolated private func availabilityMayHaveChanged() {
+        Task { @MainActor [weak self] in
+            guard let self, self.lifecycleObservationStarted, !self.terminationPending else { return }
+            self.refreshAvailability()
+        }
+    }
     func select(_ id: String) {
         guard let candidate = sets.first(where: { $0.id == id }) else { return }
         browsedSetID = id
@@ -306,6 +332,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         guard !readOnly else { settings?.inspectSet(id); return }
+        invalidateAutomaticRecovery()
         configuration.selectedSetID = id
         if persist() { recalculate(apply: configuration.rotationEnabled) }
     }
@@ -318,6 +345,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !available.isEmpty else { openWallpaperSettings(); return }
         let service: any WallpaperDownloading = enableEnvironment?.makeDownloader?() ?? WallpaperDownloader()
         downloader = service
+        downloadIsAutomatic = false
         downloadingSetID = id
         downloadProgress = WallpaperDownloadProgress(completedCount: 0, totalCount: available.count)
         message = ""
@@ -344,6 +372,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func cancelDownload() {
         guard !readOnly, downloadRunning else { return }
+        if downloadIsAutomatic && !terminationPending { pause("By you") }
         downloadTask?.cancel(); downloader?.cancel()
         message = "Cancelling download…"; render()
     }
@@ -355,7 +384,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func commitRotationSelection(_ selection: RotationSelection) -> Bool {
         guard !readOnly, configurationLoadError == nil else { return false }
         do {
-            configuration = try selection.commit(to: configuration, sets: sets, save: saveConfiguration)
+            let updated = try selection.commit(to: configuration, sets: sets, save: saveConfiguration)
+            if updated.selectedSetID != configuration.selectedSetID || updated.mappings != configuration.mappings { invalidateAutomaticRecovery() }
+            configuration = updated
             return true
         } catch {
             message = error.localizedDescription
@@ -413,6 +444,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if persist() { recalculate(apply: true) }
     }
     private func pause(_ reason: String) {
+        invalidateAutomaticRecovery()
+        automaticRecoveryStatus = nil
+        recordEvent("pause", fields: ["reason": reason == "By you" ? "manual" : reason.contains("outside") ? "outside_change" : "setup"])
         configuration.rotationEnabled = false; configuration.pauseReason = reason
         timer?.invalidate(); timer = nil
         _ = persist(); render()
@@ -443,7 +477,17 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func applyCurrentScene() {
         guard !terminationPending else { return }
         if nativeOperationRunning { queuedNativeApply = true; return }
-        guard !readOnly, canEnable, nativeReady, let set = selectedSet, let phase = schedule?.phase,
+        guard !readOnly, canPrepareRotation, nativeReady else {
+            if configuration.rotationEnabled { pause("Scene or compatibility check unavailable") }; return
+        }
+        guard ready(selectedSet) else { recoverMissingMappedMovies(); return }
+        if var policy = configuration.automaticRecovery, policy.healthySince == nil {
+            policy.markReady(at: now()); configuration.automaticRecovery = policy
+            guard persist() else { return }
+        }
+        automaticRecoveryStatus = nil
+        recoveryTimer?.invalidate(); recoveryTimer = nil
+        guard let set = selectedSet, let phase = schedule?.phase,
               let asset = set.asset(for: phase, mapping: mapping(for: set)), asset.isDownloaded else {
             if configuration.rotationEnabled { pause("Scene or compatibility check unavailable") }; return
         }
@@ -463,6 +507,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let inspection = result.inspection { self.inspection = inspection }
             self.pendingApply = result.pending
             if let error = result.error {
+                self.recordEvent("native_failure", fields: ["reason": "native_state"])
+                self.invalidateAutomaticRecovery()
+                self.automaticRecoveryStatus = nil
                 self.message = error
                 self.configuration.rotationEnabled = false
                 self.configuration.pauseReason = "Native wallpaper update failed"
@@ -492,6 +539,123 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if self.enableEnvironment == nil { self.scheduleNativeCheck() }
         }
         render()
+    }
+
+    private func recordEvent(_ event: String, fields: [String: String] = [:]) {
+        guard !readOnly else { return }
+        // Fixtures record only through their injected sink; they never touch the user's log.
+        if let enableEnvironment { enableEnvironment.recordEvent?(event, fields) }
+        else { RecoveryEventLog.shared.record(event, fields: fields) }
+    }
+
+    private func invalidateAutomaticRecovery() {
+        recoveryGeneration += 1
+        recoveryTimer?.invalidate(); recoveryTimer = nil
+        if downloadIsAutomatic { downloadTask?.cancel(); downloader?.cancel() }
+    }
+
+    /// An explicit retry refreshes both native ownership and the catalog, while respecting
+    /// the persisted budget. Repeated clicks cannot bypass a low-disk or network backoff.
+    func retryAutomaticRecovery() {
+        guard configuration.rotationEnabled, !readOnly, !terminationPending else { return }
+        refreshAvailability()
+    }
+
+    private func recoverMissingMappedMovies() {
+        guard runtimeReconciliationReady, configuration.rotationEnabled, canPrepareRotation,
+              nativeReady, !terminationPending, checkOwnership() else { return }
+        var policy = configuration.automaticRecovery ?? AutomaticRecoveryPolicy()
+        let date = now()
+        policy.noteMissing(at: date)
+        if configuration.automaticRecovery != nil && configuration.automaticRecovery != policy {
+            configuration.automaticRecovery = policy
+            guard persist() else { return }
+        }
+        guard let set = selectedSet, !set.requiresReview || configuration.mappings[set.id] != nil else {
+            automaticRecoveryStatus = "Waiting for the mapped scenes to be reviewed."
+            return
+        }
+        let mapping = mapping(for: set)
+        let mapped = WallpaperPhase.allCases.compactMap { set.asset(for: $0, mapping: mapping) }
+        guard mapped.count == WallpaperPhase.allCases.count else {
+            automaticRecoveryStatus = "Waiting for the mapped scenes in Apple's catalog."
+            return
+        }
+        var destinations = Set<URL>()
+        let missing = mapped.filter { destinations.insert($0.videoURL).inserted && !$0.isDownloaded }
+        guard !missing.isEmpty else { return }
+        guard !downloadRunning else {
+            if !downloadIsAutomatic { automaticRecoveryStatus = "Waiting for the current download to finish." }
+            return
+        }
+        let available = missing.filter { $0.downloadURL != nil }
+        guard !available.isEmpty else {
+            automaticRecoveryStatus = "Waiting for Apple to make the mapped scenes available."
+            return
+        }
+        if let retry = policy.nextEligibleAt, date < retry {
+            automaticRecoveryStatus = "Waiting to retry the missing scenes at \(formatTime(retry))."
+            if lastBackoffEvent != retry {
+                lastBackoffEvent = retry
+                recordEvent("recovery_backoff", fields: ["attempt": String(policy.attemptCount), "retryAt": ISO8601DateFormatter().string(from: retry)])
+            }
+            scheduleRecoveryRetry(at: retry)
+            return
+        }
+        policy.beginAttempt(at: date)
+        configuration.automaticRecovery = policy
+        // Reserve the retry budget durably before starting the streaming downloader.
+        guard persist() else { automaticRecoveryStatus = nil; return }
+        let generation = recoveryGeneration
+        let service: any WallpaperDownloading = enableEnvironment?.makeDownloader?() ?? WallpaperDownloader()
+        downloader = service
+        downloadIsAutomatic = true
+        downloadingSetID = set.id
+        downloadProgress = .init(completedCount: 0, totalCount: available.count)
+        automaticRecoveryStatus = "Downloading missing scenes for \(set.name)…"
+        recordEvent("recovery_attempt", fields: ["count": String(available.count), "attempt": String(policy.attemptCount),
+                                                 "setID": set.id, "assetIDs": available.map(\.id).joined(separator: ","),
+                                                 "phase": schedule?.phase.rawValue ?? "unknown"])
+        downloadTask = Task { [weak self] in
+            var result = "success"
+            do {
+                try await service.download(assets: available) { [weak self] progress in
+                    guard let self, self.recoveryGeneration == generation else { return }
+                    self.downloadProgress = progress; self.render()
+                }
+            } catch is CancellationError { result = "cancellation" }
+            catch { result = "download_failed" }
+            guard let self else { return }
+            self.downloadTask = nil; self.downloader = nil
+            self.downloadingSetID = nil; self.downloadProgress = nil
+            self.downloadIsAutomatic = false
+            // A success also consumes the budget: immediate repeated Apple purges must
+            // not turn successful downloads into an unbounded disk/network loop.
+            if var state = self.configuration.automaticRecovery {
+                state.finishAttempt(at: self.now())
+                self.configuration.automaticRecovery = state
+                _ = self.persist()
+            }
+            self.recordEvent("recovery_result", fields: ["reason": result])
+            guard !self.terminationPending else { return }
+            if self.recoveryGeneration != generation || !self.configuration.rotationEnabled {
+                self.automaticRecoveryStatus = nil
+            }
+            // Read catalog and ownership anew, then calculate the actual current phase.
+            // No captured phase, set, mapping or receipt is used for application.
+            self.refreshAvailability()
+        }
+        render()
+    }
+
+    private func scheduleRecoveryRetry(at date: Date) {
+        recoveryTimer?.invalidate()
+        let deadline = Date().addingTimeInterval(max(1, date.timeIntervalSince(now())))
+        let retry = Timer(fire: deadline, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.retryAutomaticRecovery() }
+        }
+        recoveryTimer = retry
+        RunLoop.main.add(retry, forMode: .common)
     }
 
     private func recoverPendingApply() {
@@ -553,6 +717,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func startLifecycleObservation() {
         guard !readOnly, !lifecycleObservationStarted else { return }
         lifecycleObservationStarted = true
+        NotificationCenter.default.addObserver(self, selector: #selector(availabilityMayHaveChanged),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
@@ -563,7 +729,25 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NotificationCenter.default.addObserver(self, selector: #selector(lifecycleChanged), name: name, object: nil)
         }
     }
-    @objc private func lifecycleChanged() {
+    func stopLifecycleObservation() {
+        lifecycleObservationStarted = false
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.removeObserver(self, name: name, object: nil)
+        }
+        for name in [NSApplication.didBecomeActiveNotification, NSApplication.didChangeScreenParametersNotification,
+                     .NSSystemTimeZoneDidChange, .NSCalendarDayChanged, .NSSystemClockDidChange] {
+            NotificationCenter.default.removeObserver(self, name: name, object: nil)
+        }
+    }
+    @objc nonisolated private func lifecycleChanged() {
+        Task { @MainActor [weak self] in
+            guard let self, self.lifecycleObservationStarted, !self.terminationPending else { return }
+            self.reconcileLifecycleChange()
+        }
+    }
+    private func reconcileLifecycleChange() {
         guard !readOnly, runtimeReconciliationReady else { return }
         // Lifecycle reconciliation lets the adapter distinguish new contexts from changed owned ones.
         if configuration.rotationEnabled && checkOwnership() { recalculate(apply: true) }
@@ -608,7 +792,12 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @discardableResult private func persist() -> Bool {
         guard !readOnly, configurationLoadError == nil else { return false }
         do { try saveConfiguration(configuration); return true }
-        catch { message = error.localizedDescription; configuration.rotationEnabled = false; configuration.pauseReason = "Configuration could not be saved"; render(); return false }
+        catch {
+            invalidateAutomaticRecovery(); automaticRecoveryStatus = nil
+            recordEvent("pause", fields: ["reason": "persistence"])
+            message = error.localizedDescription; configuration.rotationEnabled = false
+            configuration.pauseReason = "Configuration could not be saved"; render(); return false
+        }
     }
     func loginStatus() -> SMAppService.Status { SMAppService.mainApp.status }
     func setStartAtLogin(_ enabled: Bool) {
@@ -811,11 +1000,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 updateRotationMenuItem(item)
             }
             if let item = menu.items.first(where: { $0.identifier?.rawValue == "download-status" }) {
-                let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
-                let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
-                item.title = downloadRunning ? "Downloading \(name)\(progress)…" : "Download finished — see Settings"
+                item.title = downloadRunning ? menuDownloadTitle : (automaticRecoveryStatus ??
+                    ((item.representedObject as? Bool == true && !configuration.rotationEnabled)
+                     ? "Rotation paused" : "Download finished — see Settings"))
             }
-            menu.items.first(where: { $0.identifier?.rawValue == "cancel-download" })?.isEnabled = downloadRunning && !readOnly
+            if let item = menu.items.first(where: { $0.identifier?.rawValue == "cancel-download" }) {
+                item.title = downloadIsAutomatic ? "Cancel Download and Pause Rotation" : "Cancel Download"
+                item.isEnabled = downloadRunning && !readOnly
+            }
+            menu.items.first(where: { $0.identifier?.rawValue == "recovery-status" })?.title =
+                automaticRecoveryStatus ?? (configuration.rotationEnabled ? "Recovery finished — see Settings" : "Rotation paused")
+            menu.items.first(where: { $0.identifier?.rawValue == "retry-download" })?.isEnabled =
+                !readOnly && configuration.rotationEnabled && automaticRecoveryStatus != nil && !downloadRunning
             return
         }
         menu.removeAllItems()
@@ -833,15 +1029,24 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         setItem.submenu = submenu; menu.addItem(setItem)
         if downloadRunning {
-            let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
-            let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
-            let item = NSMenuItem(title: "Downloading \(name)\(progress)…", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: menuDownloadTitle, action: nil, keyEquivalent: "")
             item.identifier = NSUserInterfaceItemIdentifier("download-status")
+            item.representedObject = downloadIsAutomatic
             item.isEnabled = false; menu.addItem(item)
-            let cancel = NSMenuItem(title: "Cancel Download", action: #selector(menuCancelDownload), keyEquivalent: "")
+            let cancel = NSMenuItem(title: downloadIsAutomatic ? "Cancel Download and Pause Rotation" : "Cancel Download",
+                                    action: #selector(menuCancelDownload), keyEquivalent: "")
             cancel.identifier = NSUserInterfaceItemIdentifier("cancel-download")
             cancel.target = self; cancel.isEnabled = !readOnly; menu.addItem(cancel)
-        } else if let set = browsedSet, set.assets.contains(where: { !$0.isDownloaded }) {
+        } else if configuration.rotationEnabled, let status = automaticRecoveryStatus {
+            let item = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            item.identifier = NSUserInterfaceItemIdentifier("recovery-status")
+            item.isEnabled = false; menu.addItem(item)
+            let retry = NSMenuItem(title: "Check Downloads", action: #selector(menuRetryDownload), keyEquivalent: "")
+            retry.identifier = NSUserInterfaceItemIdentifier("retry-download")
+            retry.target = self; retry.isEnabled = !readOnly; menu.addItem(retry)
+        }
+        if !downloadRunning, let set = browsedSet, set.assets.contains(where: { !$0.isDownloaded }),
+           automaticRecoveryStatus == nil || set.id != selectedSet?.id {
             let download = NSMenuItem(title: "Download \(set.name)…", action: #selector(menuDownloadSet(_:)), keyEquivalent: "")
             download.target = self; download.representedObject = set.id; download.isEnabled = !readOnly
             menu.addItem(download)
@@ -859,7 +1064,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.state = configuration.rotationEnabled ? .on : .off
         item.isEnabled = configuration.rotationEnabled || canEnableRequestedRotation
     }
+    private var menuDownloadTitle: String {
+        let name = sets.first { $0.id == downloadingSetID }?.name ?? "Set"
+        let progress = downloadProgress.map { " (\($0.completedCount)/\($0.totalCount))" } ?? ""
+        return "\(downloadIsAutomatic ? "Restoring" : "Downloading") \(name)\(progress)…"
+    }
     @objc private func menuCancelDownload() { cancelDownload() }
+    @objc private func menuRetryDownload() { retryAutomaticRecovery() }
     @objc private func menuDownloadSet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { downloadSet(id) } }
     @objc private func menuSelectedSet(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { select(id) } }
     func formatTime(_ date: Date) -> String {

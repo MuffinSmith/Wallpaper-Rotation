@@ -25,6 +25,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let downloadIndicator = NSProgressIndicator()
     private let downloadProgressLabel = NSTextField(labelWithString: "")
     private let cancelDownloadButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let retryDownloadButton = NSButton(title: "Check Downloads", target: nil, action: nil)
     private let downloadFallbackButton = NSButton(title: "Open Wallpaper Settings…", target: nil, action: nil)
     private let downloadProgressRow = NSStackView()
     private let restoreButton = NSButton(title: "Restore Previous Setup…", target: nil, action: nil)
@@ -168,8 +169,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         downloadProgressLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         cancelDownloadButton.target = self; cancelDownloadButton.action = #selector(cancelDownload)
         cancelDownloadButton.bezelStyle = .inline
+        retryDownloadButton.target = self; retryDownloadButton.action = #selector(retryDownload)
+        retryDownloadButton.bezelStyle = .rounded
         downloadProgressRow.orientation = .horizontal; downloadProgressRow.alignment = .centerY; downloadProgressRow.spacing = 10
-        for view in [downloadIndicator, downloadProgressLabel, spacer(), cancelDownloadButton] { downloadProgressRow.addArrangedSubview(view) }
+        for view in [downloadIndicator, downloadProgressLabel, spacer(), cancelDownloadButton, retryDownloadButton] { downloadProgressRow.addArrangedSubview(view) }
         downloadFallbackButton.target = self; downloadFallbackButton.action = #selector(openWallpaper)
         downloadFallbackButton.bezelStyle = .inline; downloadFallbackButton.alignment = .left
         customizeButton.target = self; customizeButton.action = #selector(toggleCustomization)
@@ -330,7 +333,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let missing = set?.assets.filter { !$0.isDownloaded } ?? []
         let downloadable = missing.filter { $0.downloadURL != nil }
         let unavailable = missing.count - downloadable.count
-        downloadButton.isHidden = missing.isEmpty
+        let recoveryStatus = coordinator.configuration.rotationEnabled ? coordinator.automaticRecoveryStatus : nil
+        let waitingForRecovery = recoveryStatus != nil && !coordinator.downloadRunning
+        let showingRecoverySet = recoveryStatus != nil && set?.id == coordinator.selectedSet?.id
+        downloadButton.isHidden = missing.isEmpty || showingRecoverySet
         downloadButton.title = downloadable.isEmpty ? "Download in Apple Settings…" : "Download Set"
         downloadButton.isEnabled = !coordinator.readOnly && !coordinator.downloadRunning
         downloadFallbackButton.isHidden = unavailable == 0 || downloadable.isEmpty
@@ -348,12 +354,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         } else {
             downloadStatus.stringValue = "\(missing.count) \(missing.count == 1 ? "scene is" : "scenes are") available to download."
         }
-        downloadProgressRow.isHidden = !coordinator.downloadRunning
+        downloadProgressRow.isHidden = !coordinator.downloadRunning && !waitingForRecovery
+        downloadIndicator.isHidden = !coordinator.downloadRunning
+        retryDownloadButton.isHidden = !waitingForRecovery
+        retryDownloadButton.isEnabled = !coordinator.readOnly && waitingForRecovery
+        cancelDownloadButton.isHidden = !coordinator.downloadRunning
+        cancelDownloadButton.title = coordinator.downloadIsAutomatic ? "Pause Rotation" : "Cancel"
+        cancelDownloadButton.toolTip = coordinator.downloadIsAutomatic ? "Cancel this download and pause automatic rotation." : nil
         cancelDownloadButton.isEnabled = !coordinator.readOnly
-        guard coordinator.downloadRunning else { downloadIndicator.stopAnimation(nil); return }
+        guard coordinator.downloadRunning else {
+            downloadProgressLabel.stringValue = recoveryStatus ?? ""
+            downloadIndicator.stopAnimation(nil)
+            return
+        }
         let name = coordinator.sets.first { $0.id == coordinator.downloadingSetID }?.name ?? "wallpaper set"
+        let activity = coordinator.downloadIsAutomatic ? "Restoring \(name)…" : name
         if let progress = coordinator.downloadProgress {
-            downloadProgressLabel.stringValue = "\(name) · \(progress.completedCount) of \(progress.totalCount) scenes"
+            downloadProgressLabel.stringValue = "\(activity) · \(progress.completedCount) of \(progress.totalCount) scenes"
             if let fraction = progress.fractionCompleted, fraction.isFinite {
                 downloadIndicator.isIndeterminate = false; downloadIndicator.stopAnimation(nil)
                 downloadIndicator.doubleValue = min(1, max(0, fraction))
@@ -361,7 +378,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 downloadIndicator.isIndeterminate = true; downloadIndicator.startAnimation(nil)
             }
         } else {
-            downloadProgressLabel.stringValue = "Preparing \(name)…"
+            downloadProgressLabel.stringValue = coordinator.downloadIsAutomatic ? activity : "Preparing \(name)…"
             downloadIndicator.isIndeterminate = true; downloadIndicator.startAnimation(nil)
         }
     }
@@ -530,6 +547,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
     }
     @objc private func cancelDownload() { guard !coordinator.readOnly else { return }; coordinator.cancelDownload() }
+    @objc private func retryDownload() { guard !coordinator.readOnly else { return }; coordinator.retryAutomaticRecovery() }
     @objc private func loginChanged() { coordinator.setStartAtLogin(loginSwitch.state == .on) }
     @objc private func openLoginSettings() { coordinator.openLoginSettings() }
     @objc private func openWallpaper() { coordinator.openWallpaperSettings() }

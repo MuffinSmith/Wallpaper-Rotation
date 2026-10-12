@@ -55,11 +55,13 @@ private final class MorningFixture {
 
     private final class State {
         var clock = ISO8601DateFormatter().date(from: "2026-10-08T07:00:00Z")!
+        var clockReads = 0
         var saved: [AppConfiguration] = []
     }
     private let state = State()
     var date: Date { get { state.clock } set { state.clock = newValue } }
     var durable: AppConfiguration? { state.saved.last }
+    var clockReads: Int { state.clockReads }
     init(enabled: Bool = false, runtimeReady: Bool = true) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("morning-native-\(UUID().uuidString)")
         store = root.appendingPathComponent("Store/Index.plist")
@@ -93,7 +95,10 @@ private final class MorningFixture {
         let environment = AppCoordinator.EnableEnvironment(isReady: { true }, saveConfiguration: { state.saved.append($0) },
             applyAsset: nil, checkCompatibility: { _ in }, showSettings: {}, runtimeReconciliationReady: runtimeReady)
         coordinator = AppCoordinator(configuration: initial, sets: [set], enableEnvironment: environment,
-                                     nativeWorker: worker, nativeAdapter: adapter, now: { state.clock })
+                                     nativeWorker: worker, nativeAdapter: adapter, now: {
+                                         state.clockReads += 1
+                                         return state.clock
+                                     })
     }
     static func plist(_ value: Any) throws -> Data {
         try PropertyListSerialization.data(fromPropertyList: value, format: .binary, options: 0)
@@ -102,12 +107,39 @@ private final class MorningFixture {
     func cleanup() {
         if coordinator.configuration.rotationEnabled { coordinator.toggleRotation() }
         coordinator.stopNativeObservation()
+        coordinator.stopLifecycleObservation()
         try? FileManager.default.removeItem(at: root)
     }
     func settle() async throws {
         let deadline = Date().addingTimeInterval(5)
         while coordinator.nativeOperationRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         try #require(!coordinator.nativeOperationRunning, "Fixture native transaction did not settle within five seconds")
+    }
+    // A posted selector now queues a MainActor task. Await its observable clock
+    // evaluation before checking the worker, which may not have started yet.
+    func postAndWait(_ event: ObservedCoordinatorEvent, background: Bool = true) async throws {
+        let previousReads = clockReads
+        let center = event.center
+        let name = event.name
+        if background {
+            await Task.detached { center.post(name: name, object: nil) }.value
+        } else {
+            center.post(name: name, object: nil)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while clockReads == previousReads && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        try #require(clockReads > previousReads, "Posted notification did not reach reconciliation within five seconds")
+        try await settle()
+    }
+    func postWhileHoldingMainActor(_ event: ObservedCoordinatorEvent) throws {
+        let center = event.center
+        let name = event.name
+        let posted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            center.post(name: name, object: nil)
+            posted.signal()
+        }
+        try #require(posted.wait(timeout: .now() + 5) == .success)
     }
     func enableNight() async throws {
         coordinator.toggleRotation()
@@ -128,7 +160,107 @@ private final class MorningFixture {
     }
 }
 
+enum ObservedCoordinatorEvent: CaseIterable, Sendable {
+    case calendarDay, timeZone, systemClock, wake, session, space, screen, applicationActive
+
+    var center: NotificationCenter {
+        switch self {
+        case .wake, .session, .space: NSWorkspace.shared.notificationCenter
+        default: NotificationCenter.default
+        }
+    }
+    var name: Notification.Name {
+        switch self {
+        case .calendarDay: .NSCalendarDayChanged
+        case .timeZone: .NSSystemTimeZoneDidChange
+        case .systemClock: .NSSystemClockDidChange
+        case .wake: NSWorkspace.didWakeNotification
+        case .session: NSWorkspace.sessionDidBecomeActiveNotification
+        case .space: NSWorkspace.activeSpaceDidChangeNotification
+        case .screen: NSApplication.didChangeScreenParametersNotification
+        case .applicationActive: NSApplication.didBecomeActiveNotification
+        }
+    }
+}
+
 extension MorningReconciliationTests {
+    @Test func backgroundCalendarDayNotificationCatchesUp() async throws {
+        let fixture = try MorningFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startLifecycleObservation()
+        try await fixture.enableNight()
+        fixture.advanceToDay()
+        try await fixture.postAndWait(.calendarDay)
+        #expect(fixture.coordinator.configuration.receipt?.assetID == MorningFixture.dayID)
+        #expect(fixture.reloads.value == 2)
+    }
+    @Test(arguments: ObservedCoordinatorEvent.allCases)
+    func backgroundNotificationCatchesUpAndRepeatedDeliveryDoesNotWrite(_ event: ObservedCoordinatorEvent) async throws {
+        let fixture = try MorningFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startLifecycleObservation()
+        try await fixture.enableNight()
+        fixture.advanceToDay()
+        try await fixture.postAndWait(event)
+        #expect(fixture.coordinator.configuration.receipt?.assetID == MorningFixture.dayID)
+        #expect(fixture.reloads.value == 2)
+        let bytes = try Data(contentsOf: fixture.store)
+        try await fixture.postAndWait(event)
+        #expect(fixture.reloads.value == 2)
+        #expect(try Data(contentsOf: fixture.store) == bytes)
+    }
+    @Test(arguments: ObservedCoordinatorEvent.allCases)
+    func backgroundNotificationKeepsPausedWallpaperUntouched(_ event: ObservedCoordinatorEvent) async throws {
+        let fixture = try MorningFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startLifecycleObservation()
+        try await fixture.enableNight()
+        fixture.coordinator.toggleRotation()
+        fixture.advanceToDay()
+        let bytes = try Data(contentsOf: fixture.store)
+        try await fixture.postAndWait(event)
+        #expect(fixture.coordinator.schedule?.phase == .day)
+        #expect(!fixture.coordinator.configuration.rotationEnabled)
+        #expect(fixture.reloads.value == 1)
+        #expect(try Data(contentsOf: fixture.store) == bytes)
+    }
+    @Test(arguments: ObservedCoordinatorEvent.allCases)
+    func backgroundNotificationPreservesExternalEditAndPauses(_ event: ObservedCoordinatorEvent) async throws {
+        let fixture = try MorningFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startLifecycleObservation()
+        try await fixture.enableNight()
+        try fixture.manuallyChangeOwnedScene()
+        fixture.advanceToDay()
+        let bytes = try Data(contentsOf: fixture.store)
+        try await fixture.postAndWait(event)
+        #expect(!fixture.coordinator.configuration.rotationEnabled)
+        #expect(fixture.durable?.pauseReason == "Wallpaper changed outside Wallpaper Rotation")
+        #expect(fixture.reloads.value == 1)
+        #expect(try Data(contentsOf: fixture.store) == bytes)
+    }
+    @Test(arguments: ObservedCoordinatorEvent.allCases)
+    func stoppedObservationDiscardsQueuedAndFutureNotifications(_ event: ObservedCoordinatorEvent) async throws {
+        let fixture = try MorningFixture()
+        defer { fixture.cleanup() }
+        fixture.coordinator.startLifecycleObservation()
+        try await fixture.enableNight()
+        fixture.advanceToDay()
+        let bytes = try Data(contentsOf: fixture.store)
+        let reads = fixture.clockReads
+        let center = event.center
+        let name = event.name
+        // Hold MainActor until the background selector has queued its task,
+        // then stop before allowing that task to execute.
+        try fixture.postWhileHoldingMainActor(event)
+        fixture.coordinator.stopLifecycleObservation()
+        await Task.detached { center.post(name: name, object: nil) }.value
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(fixture.clockReads == reads)
+        #expect(fixture.coordinator.configuration.receipt?.assetID == MorningFixture.nightID)
+        #expect(fixture.reloads.value == 1)
+        #expect(try Data(contentsOf: fixture.store) == bytes)
+    }
     @Test func overdueMenuRefreshAppliesOnlyCurrentDaySceneAndRepeatedRefreshDoesNotWrite() async throws {
         let fixture = try MorningFixture()
         defer { fixture.cleanup() }
@@ -149,13 +281,10 @@ extension MorningReconciliationTests {
         fixture.coordinator.startLifecycleObservation()
         try await fixture.enableNight()
         fixture.advanceToDay()
-        let center = NSWorkspace.shared.notificationCenter
-        center.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        try await fixture.settle()
+        try await fixture.postAndWait(.session, background: false)
         #expect(fixture.coordinator.configuration.receipt?.assetID == MorningFixture.dayID)
         let bytes = try Data(contentsOf: fixture.store)
-        center.post(name: NSWorkspace.didWakeNotification, object: nil)
-        try await fixture.settle()
+        try await fixture.postAndWait(.wake, background: false)
         #expect(fixture.reloads.value == 2)
         #expect(try Data(contentsOf: fixture.store) == bytes)
     }
@@ -168,8 +297,7 @@ extension MorningReconciliationTests {
         fixture.advanceToDay()
         let bytes = try Data(contentsOf: fixture.store)
         fixture.coordinator.refreshAvailability()
-        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        try await fixture.settle()
+        try await fixture.postAndWait(.session, background: false)
         #expect(!fixture.coordinator.configuration.rotationEnabled)
         #expect(fixture.reloads.value == 1)
         #expect(try Data(contentsOf: fixture.store) == bytes)
@@ -183,8 +311,7 @@ extension MorningReconciliationTests {
         let outsideBytes = try Data(contentsOf: fixture.store)
         fixture.advanceToDay()
         fixture.coordinator.menuWillOpen(NSMenu())
-        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        try await fixture.settle()
+        try await fixture.postAndWait(.session, background: false)
         #expect(!fixture.coordinator.configuration.rotationEnabled)
         #expect(fixture.durable?.pauseReason == "Wallpaper changed outside Wallpaper Rotation")
         #expect(fixture.reloads.value == 1)

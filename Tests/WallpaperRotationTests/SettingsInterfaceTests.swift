@@ -38,8 +38,9 @@ struct SettingsInterfaceTests {
         var failSave = false
         var beforeSave: ((AppConfiguration) -> Void)?
         var fakeDownload: ControlledDownload?
+        var settingsRequests = 0
 
-        init(failsReload: Bool = false) throws {
+        init(failsReload: Bool = false, downloadableSelected: Bool = false) throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("interface-audit-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let movie = root.appendingPathComponent("complete.mov")
@@ -52,7 +53,8 @@ struct SettingsInterfaceTests {
                     WallpaperAsset(id: String(format: "00000000-0000-0000-0000-%012d", index * 10 + phaseIndex + 1),
                                    shotID: phase.rawValue, name: "\(name) \(phase.title)", previewURL: nil,
                                    videoURL: name == "Missing" ? missingMovie : movie,
-                                   downloadURL: name == "Missing" ? URL(string: "https://invalid.example/fixture.mov") : nil)
+                                   downloadURL: name == "Missing" || (downloadableSelected && name == "New")
+                                    ? URL(string: "https://invalid.example/fixture.mov") : nil)
                 }
                 return WallpaperSet(id: name, name: name, assets: assets,
                                     suggestedMapping: Dictionary(uniqueKeysWithValues: zip(WallpaperPhase.allCases, assets.map(\.id))),
@@ -83,9 +85,11 @@ struct SettingsInterfaceTests {
                     if failSave { throw CocoaError(.fileWriteNoPermission) }
                     beforeSave?(value)
                     saved.append(value)
-                }, applyAsset: nil, checkCompatibility: { _ in }, showSettings: {},
+                }, applyAsset: nil, checkCompatibility: { _ in }, showSettings: { [self] in settingsRequests += 1 },
                 replyToTermination: { [self] in terminationReplies.append($0) },
-                makeDownloader: { [self] in let value = ControlledDownload(); fakeDownload = value; return value }), nativeWorker: worker)
+                makeDownloader: { [self] in let value = ControlledDownload(); fakeDownload = value; return value }),
+                nativeWorker: worker, nativeAdapter: NativeWallpaperAdapter(storeURL: storeURL, backupDir: backups,
+                    reload: { try reloadProbe.reload() }, assetAvailable: { _ in true }))
         }
         func settings() -> SettingsWindowController {
             let controller = SettingsWindowController(coordinator: coordinator)
@@ -94,6 +98,7 @@ struct SettingsInterfaceTests {
         }
         func cleanup() {
             if coordinator.configuration.rotationEnabled { coordinator.toggleRotation() }
+            fakeDownload?.finishCancellation()
             try? FileManager.default.removeItem(at: root)
         }
     }
@@ -110,6 +115,7 @@ struct SettingsInterfaceTests {
         }
         func cancel() { cancelled = true }
         func finishCancellation() { continuation?.resume(throwing: CancellationError()); continuation = nil }
+        func fail() { continuation?.resume(throwing: URLError(.notConnectedToInternet)); continuation = nil }
     }
     private func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
     private func control<T: NSControl>(_ type: T.Type, label: String, in settings: SettingsWindowController) throws -> T {
@@ -132,6 +138,99 @@ struct SettingsInterfaceTests {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), "Timed out waiting for the native operation or UI callback")
+    }
+
+    private func startAutomaticRecovery(_ fixture: Fixture, settings: SettingsWindowController) async throws {
+        try choose(1, in: settings)
+        try await waitUntil { !fixture.coordinator.nativeOperationRunning }
+        try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("complete.mov"))
+        fixture.coordinator.refreshAvailability()
+        try await waitUntil { fixture.fakeDownload?.started == true }
+        settings.render()
+    }
+
+    @Test func automaticRecoveryShowsRestorationAndCancellationPausesRotation() async throws {
+        _ = NSApplication.shared
+        let fixture = try Fixture(downloadableSelected: true)
+        defer { fixture.cleanup() }
+        let coordinator = try #require(fixture.coordinator)
+        let settings = fixture.settings()
+        try await startAutomaticRecovery(fixture, settings: settings)
+        #expect(coordinator.downloadIsAutomatic)
+        #expect(fixture.settingsRequests == 0)
+        let labels = descendants(try #require(settings.window?.contentView)).compactMap { $0 as? NSTextField }
+        #expect(labels.contains { $0.stringValue.hasPrefix("Restoring New… ·") })
+        let cancel = try button(action: "cancelDownload", in: settings)
+        #expect(cancel.title == "Pause Rotation")
+        #expect(cancel.toolTip?.contains("pause automatic rotation") == true)
+        let rotation = try control(NSSwitch.self, label: "Automatic wallpaper rotation", in: settings)
+        #expect(rotation.state == .on && rotation.isEnabled)
+        let menu = NSMenu()
+        coordinator.renderMenuContents(menu)
+        #expect(menu.items.contains { $0.title.hasPrefix("Restoring New") })
+        #expect(menu.items.contains { $0.title == "Cancel Download and Pause Rotation" && $0.isEnabled })
+        #expect(menu.items.contains { $0.title == "Pause Rotation" && $0.isEnabled })
+        coordinator.menuWillOpen(menu)
+        let status = try #require(menu.items.first { $0.identifier?.rawValue == "download-status" })
+        try invoke(cancel)
+        #expect(!coordinator.configuration.rotationEnabled)
+        #expect(fixture.fakeDownload?.cancelled == true)
+        fixture.fakeDownload?.finishCancellation()
+        try await waitUntil { !coordinator.downloadRunning }
+        coordinator.renderMenuContents(menu)
+        #expect(menu.items.contains { $0 === status })
+        #expect(status.title == "Rotation paused")
+        coordinator.menuDidClose(menu)
+    }
+
+    @Test func recoveryFailureOffersRetryWithoutChangingBrowsedCollectionControls() async throws {
+        let fixture = try Fixture(downloadableSelected: true)
+        defer { fixture.cleanup() }
+        let coordinator = try #require(fixture.coordinator)
+        let settings = fixture.settings()
+        try await startAutomaticRecovery(fixture, settings: settings)
+        fixture.fakeDownload?.fail()
+        try await waitUntil { !coordinator.downloadRunning && coordinator.automaticRecoveryStatus != nil }
+        settings.render()
+        let retry = try button(action: "retryDownload", in: settings)
+        #expect(retry.title == "Check Downloads" && !retry.isHidden && retry.isEnabled)
+        #expect(try button(action: "downloadSet", in: settings).isHidden)
+        let labels = descendants(try #require(settings.window?.contentView)).compactMap { $0 as? NSTextField }
+        #expect(labels.contains { $0.stringValue == coordinator.automaticRecoveryStatus })
+        #expect(coordinator.configuration.rotationEnabled)
+        try choose(2, in: settings)
+        #expect(coordinator.selectedSet?.id == "New")
+        #expect(coordinator.browsedSet?.id == "Missing")
+        let download = try button(action: "downloadSet", in: settings)
+        #expect(!download.isHidden && download.isEnabled && download.title == "Download Set")
+        let menu = NSMenu()
+        coordinator.renderMenuContents(menu)
+        #expect(menu.items.contains { $0.title == "Check Downloads" && $0.isEnabled })
+        #expect(menu.items.contains { $0.title == "Download Missing…" && $0.isEnabled })
+        try invoke(retry)
+        #expect(coordinator.browsedSet?.id == "Missing")
+    }
+
+    @Test func manualDownloadKeepsExistingProgressAndCancelBehavior() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let coordinator = try #require(fixture.coordinator)
+        let settings = fixture.settings()
+        coordinator.downloadSet("Missing")
+        try await waitUntil { fixture.fakeDownload?.started == true }
+        settings.render()
+        #expect(!coordinator.downloadIsAutomatic)
+        let cancel = try button(action: "cancelDownload", in: settings)
+        #expect(cancel.title == "Cancel")
+        #expect(try button(action: "retryDownload", in: settings).isHidden)
+        let menu = NSMenu()
+        coordinator.renderMenuContents(menu)
+        #expect(menu.items.contains { $0.title.hasPrefix("Downloading Missing") })
+        #expect(menu.items.contains { $0.title == "Cancel Download" })
+        try invoke(cancel)
+        #expect(coordinator.configuration.rotationEnabled)
+        fixture.fakeDownload?.finishCancellation()
+        try await waitUntil { !coordinator.downloadRunning }
     }
 
     @Test func activeSetChangeKeepsRunLoopAndSettingsResponsiveAndPauseWinsCompletion() async throws {
@@ -326,6 +425,9 @@ struct SettingsInterfaceTests {
         #expect(coordinator.message.contains("Recovery needs attention"))
         #expect(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("pending-apply.json").path))
         #expect(coordinator.configuration.receipt != nil)
+        coordinator.refreshAvailability()
+        #expect(fixture.fakeDownload == nil)
+        #expect(!coordinator.downloadRunning)
     }
 
 }

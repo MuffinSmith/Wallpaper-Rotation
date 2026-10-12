@@ -34,6 +34,15 @@ UI readiness must represent observed success. Native compatibility is checked on
 explicit Enable; fixture tests cannot produce a passing live smoke report. Keep desired selections distinct from
 actual native state and reflect startup registration from macOS's own service.
 
+NotificationCenter selectors can be entered from a posting background thread.
+Keep external notification entrypoints nonisolated, then dispatch weakly captured
+work onto MainActor before reading coordinator state. An actor-isolated Objective-C
+entry can trap before its body, so a task inside that isolated body is insufficient.
+Cover calendar midnight, clock/time-zone changes and workspace/application events
+through actual observer registration with background-posting regressions, including
+an optimized build. Stop observation at shutdown and ignore queued deliveries after
+stopping. Main-run-loop UI actions and timers remain on their established boundary.
+
 Native transactions can wait for file locks, disk writes and Apple's wallpaper
 process. Keep them off the main actor, serialize each apply/restore episode, and
 retain its operation lease until ownership persistence and journal cleanup finish.
@@ -79,3 +88,15 @@ private signing keys, or temporary build/review logs.
 CI uses the [official Xcode 27 arm64 runner image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md),
 which supplies macOS 27. Check the PR’s workflow result separately from local tests.
 When updating the deployment target, update and verify this runner choice too.
+
+
+## Purged movie recovery
+
+An enabled preference represents ongoing rotation intent while an absent movie is
+being recovered. Recovery operates on the committed phase mapping and shares the
+existing streaming downloader with manual downloads. It must not adopt a browsed
+set, bypass native compatibility or ownership checks, or resume a manual pause.
+Retry eligibility survives relaunch and repeated successful-download/purge cycles;
+ordinary notification bursts must not bypass it. Completion evaluates the latest
+clock and selection, and cancelled or obsolete work cannot resume rotation.
+Keep event logging bounded and private; do not log coordinates or full receipts.
