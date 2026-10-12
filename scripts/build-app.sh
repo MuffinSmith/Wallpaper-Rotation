@@ -29,8 +29,8 @@ cat > "$output_path/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Wallpaper Rotation</string>
 <key>CFBundleExecutable</key><string>WallpaperRotation</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.5</string>
-<key>CFBundleVersion</key><string>10</string>
+<key>CFBundleShortVersionString</key><string>0.3.6</string>
+<key>CFBundleVersion</key><string>11</string>
 <key>LSMinimumSystemVersion</key><string>27.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

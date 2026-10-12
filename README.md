@@ -60,6 +60,12 @@ The menu offers **Pause Rotation** while running and **Resume Rotation** while
 paused, with the pause reason shown above it. Enabled rotation catches up to the
 current solar phase after wake, session activation, or a menu/catalog refresh;
 missed phases are not replayed.
+If macOS purges movies from the enabled set, the app automatically downloads only
+its missing mapped scenes from Apple and then evaluates the current phase.
+Recovery retains the current wallpaper while downloading and shows its progress.
+Failed or repeatedly purged downloads use a persisted retry backoff; Pause stops
+automatic recovery. Manual wallpaper changes and compatibility failures still
+pause rotation and require review.
 All monitors and Spaces share the selected scheduled scene while rotation runs.
 Changing a ready set while rotation is enabled updates the wallpaper immediately.
 During an update, Settings remains usable and shows its progress. Further set or
@@ -97,6 +103,11 @@ quit, and delete the app. Configuration/backups live in
 you no longer want the saved settings or recovery evidence.
 
 ## Diagnostics and verification
+
+A small private rotating event log records rotation and download recovery
+outcomes under `~/Library/Application Support/Wallpaper Rotation`. It excludes
+coordinates, full recovery receipts and download URLs; bounded files keep logging
+small. Recovery logs supplement the saved configuration and macOS crash reports.
 
 Read-only commands:
 

@@ -441,3 +441,76 @@ correctness 2.4/2.5, safe settings handling 2.4/2.5, lightweight design 1.5/1.5,
 verification 1.35/1.5, interface 0.85/1 and update handling 0.9/1. The critic
 read the corrected installed observation and viewed the actual Settings image;
 no programming or native writes were performed by the critic.
+
+## Automatic recovery of purged movies 0.3.6
+
+The October 12 wrong-Night report occurred with the app still running. Only Tahoe
+Night remained; Day, Sunrise and Dusk were absent. Apple's low-disk cache purge
+at October 11 22:14:28 closely preceded the saved generic pause, but individual
+file deletion attribution was not conclusively established. Native ownership and
+current-OS compatibility still passed. This was distinct from the midnight crash
+fixed in 0.3.5, which remains included in this candidate.
+
+Enabled intent now survives missing mapped movies. The existing streaming Apple
+downloader restores only unique missing assets from the committed mapping,
+serially, behind compatibility, pending-operation and ownership gates. Completion
+rechecks current ownership and evaluates the latest time and mapping. Persistent
+five-minute, fifteen-minute and hourly retry limits include successful downloads
+followed by another purge; only an observed healthy hour resets that budget.
+Manual pauses and outside edits remain protected. Settings and the menu expose
+restoration progress and cancellation. Check Downloads refreshes readiness without
+bypassing retry limits. Private, bounded operational logging is now enabled.
+
+The old missing-asset behavior was reproduced as a failing fixture before the
+fix. The final full suite passed 172 tests: 73 app, 22 core and 77 native. Release
+recovery, logging and notification suites passed 38 declarations, including the
+existing 40 notification parameter combinations. Cases cover partial downloads,
+deduplication, persistent backoff across JSON reload, repeated successful purges,
+clock/set/mapping changes, cancel/pause/quit, real adapter external edits on a
+fixture store, pending operations, incompatible/read-only gates and bounded log
+permissions and redaction. An initial integrated UI fixture accidentally used the
+real read-only ownership probe with a disposable worker store and correctly
+paused; injecting the same disposable adapter fixed the fixture. The final full
+suite and release build passed after that correction. Plist lint and strict deep
+ad-hoc signature verification passed for 0.3.6 build 11.
+
+On the user's Mac, a fresh read-only gate confirmed ownership, compatibility,
+three missing mapped files and the Day phase. The old app was gracefully stopped,
+its executable and current configuration/native store were backed up, and the
+new app installed at its stable Applications path. This explicitly authorized
+repair resumed only the diagnosed legacy generic missing-assets pause after the
+gates passed. The application itself does not migrate generic paused states.
+
+The normal installed app automatically downloaded all three missing production
+Apple movies (1,371,900,710 bytes) without a manual download action, validated them
+and applied Tahoe Day. All four mapped files have the exact server-reported
+sizes; the existing Night movie's SHA-256 and modification time were unchanged.
+Across six five-second samples, all 37 current native selectors were Day,
+rotation stayed enabled, no operation was pending, and selected set, semantic
+mappings, saved location and every original restoration entry were retained.
+An independent capture of Apple's wallpaper window visibly shows Tahoe Day;
+the actual Settings window shows Day, rotation on and Start at Login on.
+
+The first observer passed all state samples but failed its final direct movie
+handle assertion. Apple's renderer held an unlinked temporary download file
+instead of the catalog movie path, so that assumption was invalid. The failure
+was retained; a separate state-only observer repeated the checks. Visible native
+wallpaper capture provides the independent rendering evidence. No direct movie
+handle match is claimed. The production log records startup version/build,
+three-asset recovery attempt and success; it was 740 bytes, mode 0600, without
+coordinates, full receipts or URLs.
+
+No new actual overnight run, reboot, every-Space inspection, animated screen
+saver playback, fresh location grant or memory benchmark is claimed. Rapid
+consecutive native writes remain tracked in issue #8. Ambiguous original restore
+contexts remain conservatively skipped and retained. Apple's own disk pressure
+purging can recur; retry limits prevent an unbounded immediate download loop.
+
+Snark's independent scored review 1 passed at 9.3/10 with no blockers:
+correctness 2.4/2.5, safe settings handling 2.4/2.5, lightweight design 1.35/1.5,
+verification 1.4/1.5, interface 0.85/1 and update handling 0.9/1. The critic viewed
+both installed Settings captures and the independent visible native wallpaper,
+and read the completed repeat observation and production log. The muted inline
+Pause Rotation control is a cosmetic follow-up; its enabled cancellation path is
+covered by interface fixtures. The critic performed no programming or native
+writes. PR #11 remains a draft and main is not merged.

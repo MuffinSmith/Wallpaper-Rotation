@@ -88,3 +88,15 @@ private signing keys, or temporary build/review logs.
 CI uses the [official Xcode 27 arm64 runner image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md),
 which supplies macOS 27. Check the PR’s workflow result separately from local tests.
 When updating the deployment target, update and verify this runner choice too.
+
+
+## Purged movie recovery
+
+An enabled preference represents ongoing rotation intent while an absent movie is
+being recovered. Recovery operates on the committed phase mapping and shares the
+existing streaming downloader with manual downloads. It must not adopt a browsed
+set, bypass native compatibility or ownership checks, or resume a manual pause.
+Retry eligibility survives relaunch and repeated successful-download/purge cycles;
+ordinary notification bursts must not bypass it. Completion evaluates the latest
+clock and selection, and cancelled or obsolete work cannot resume rotation.
+Keep event logging bounded and private; do not log coordinates or full receipts.
